@@ -64,6 +64,26 @@ app.post('/api/exec', async (req, res) => {
   }
 });
 
+// GET handler for simple read operations
+app.get('/api/exec', async (req, res) => {
+  const action = req.query.action;
+  
+  try {
+    let result;
+    switch (action) {
+      case 'getDashboardData':
+        result = await getDashboardData();
+        break;
+      default:
+        result = { success: false, message: 'Unknown action or use POST: ' + action };
+    }
+    res.json(result);
+  } catch (error) {
+    console.error('API Error:', error);
+    res.json({ success: false, message: error.message });
+  }
+});
+
 // Helper Functions
 
 async function getDashboardData() {
