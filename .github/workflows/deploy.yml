@@ -26,10 +26,9 @@ jobs:
             git reset --hard origin/main
             git pull origin main
 
-            rm -rf dist node_modules 
+            rm -rf node_modules 
             npm install
-            npm run build
 
-            pm2 restart feedback || pm2 start dist/server.js --name feedback --watch --env production -- --port=3015
+            pm2 restart feedback || pm2 start server.js --name feedback --env production
             pm2 save
           EOF
