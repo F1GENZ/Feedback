@@ -50,6 +50,9 @@ app.post('/api/exec', async (req, res) => {
       case 'updateStage':
         result = await updateStage(req.body.rowNumber, req.body.newStage);
         break;
+      case 'deleteFeedback':
+        result = await deleteFeedback(req.body.rowNumber);
+        break;
       default:
         result = { success: false, message: 'Unknown action: ' + action };
     }
@@ -227,6 +230,13 @@ async function updateStage(rowNumber, newStage) {
   
   await sheetsClient.updateCell(rowNumber, 'E', newStage);
   return { success: true, message: `Đã cập nhật Stage thành "${newStage}"` };
+}
+
+async function deleteFeedback(rowNumber) {
+  if (!rowNumber) throw new Error('Missing rowNumber');
+  
+  await sheetsClient.deleteRow(rowNumber);
+  return { success: true, message: 'Đã xóa feedback!' };
 }
 
 // Start server

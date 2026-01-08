@@ -130,6 +130,38 @@ class SheetsClient {
       throw error;
     }
   }
+
+  async deleteRow(rowNumber) {
+    try {
+      // Get sheet ID first
+      const spreadsheet = await this.sheets.spreadsheets.get({
+        spreadsheetId: SHEET_ID,
+      });
+      const sheet = spreadsheet.data.sheets.find(s => s.properties.title === SHEET_NAME);
+      const sheetId = sheet.properties.sheetId;
+
+      // Delete row using batchUpdate
+      await this.sheets.spreadsheets.batchUpdate({
+        spreadsheetId: SHEET_ID,
+        resource: {
+          requests: [{
+            deleteDimension: {
+              range: {
+                sheetId: sheetId,
+                dimension: 'ROWS',
+                startIndex: rowNumber - 1, // 0-based
+                endIndex: rowNumber
+              }
+            }
+          }]
+        }
+      });
+      return true;
+    } catch (error) {
+      console.error('SheetsClient: deleteRow Error:', error);
+      throw error;
+    }
+  }
 }
 
 module.exports = new SheetsClient();
