@@ -167,7 +167,7 @@ class SheetsClient {
     try {
       const response = await this.sheets.spreadsheets.values.get({
         spreadsheetId: SHEET_ID,
-        range: 'File Hướng Dẫn',
+        range: 'Intruction',
       });
 
       const data = response.data.values || [];
@@ -196,7 +196,7 @@ class SheetsClient {
     try {
       await this.sheets.spreadsheets.values.append({
         spreadsheetId: SHEET_ID,
-        range: 'File Hướng Dẫn',
+        range: 'Intruction',
         valueInputOption: 'USER_ENTERED',
         resource: { values: [rowArray] },
       });
@@ -209,7 +209,7 @@ class SheetsClient {
 
   async updateGuideRow(rowNumber, rowArray) {
     try {
-      const range = `File Hướng Dẫn!A${rowNumber}:D${rowNumber}`;
+      const range = `Intruction!A${rowNumber}:D${rowNumber}`;
       await this.sheets.spreadsheets.values.update({
         spreadsheetId: SHEET_ID,
         range: range,
@@ -228,9 +228,9 @@ class SheetsClient {
       const spreadsheet = await this.sheets.spreadsheets.get({
         spreadsheetId: SHEET_ID,
       });
-      const sheet = spreadsheet.data.sheets.find(s => s.properties.title === 'File Hướng Dẫn');
+      const sheet = spreadsheet.data.sheets.find(s => s.properties.title === 'Intruction');
       if (!sheet) {
-        throw new Error('Sheet "File Hướng Dẫn" not found');
+        throw new Error('Sheet "Intruction" not found');
       }
       const sheetId = sheet.properties.sheetId;
 
