@@ -92,6 +92,9 @@ app.get('/api/exec', async (req, res) => {
       case 'getGuidesData':
         result = await getGuidesData();
         break;
+      case 'getHistory':
+        result = await getHistory();
+        break;
       default:
         result = { success: false, message: 'Unknown action or use POST: ' + action };
     }
@@ -156,6 +159,14 @@ async function getGuidesData() {
   };
 }
 
+async function getHistory() {
+  const data = await sheetsClient.getHistoryData();
+  return {
+    success: true,
+    history: data.rows || []
+  };
+}
+
 async function createFeedback(feedback) {
   if (!feedback) throw new Error('No feedback data');
   
@@ -191,6 +202,7 @@ async function createFeedback(feedback) {
 
   const success = await sheetsClient.appendRow(row);
   if (success) {
+    await sheetsClient.logHistory('CREATE', `Tạo feedback: ${feedback.shop || 'N/A'}`);
     return { success: true, message: 'Đã tạo feedback thành công!' };
   } else {
     throw new Error('Failed to append row');
@@ -281,6 +293,7 @@ async function updateStage(rowNumber, newStage) {
   
   await sheetsClient.updateCell(rowNumber, 'E', newStage);
   await sheetsClient.updateCell(rowNumber, 'O', timestamp);
+  await sheetsClient.logHistory('UPDATE_STAGE', `Row ${rowNumber} -> ${newStage}`);
   return { success: true, message: `Đã cập nhật Stage thành "${newStage}"` };
 }
 
@@ -288,6 +301,7 @@ async function deleteFeedback(rowNumber) {
   if (!rowNumber) throw new Error('Missing rowNumber');
   
   await sheetsClient.deleteRow(rowNumber);
+  await sheetsClient.logHistory('DELETE', `Xóa row ${rowNumber}`);
   return { success: true, message: 'Đã xóa feedback!' };
 }
 

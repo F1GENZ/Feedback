@@ -256,6 +256,50 @@ class SheetsClient {
       throw error;
     }
   }
+
+  // --- HISTORY LOG ---
+  async logHistory(action, content) {
+    try {
+      const now = new Date();
+      const timestamp = now.toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' });
+      await this.sheets.spreadsheets.values.append({
+        spreadsheetId: SHEET_ID,
+        range: 'History',
+        valueInputOption: 'USER_ENTERED',
+        resource: { values: [[timestamp, action, content]] },
+      });
+      return true;
+    } catch (error) {
+      console.error('SheetsClient: logHistory Error:', error);
+      // Don't throw - logging should not break main operations
+      return false;
+    }
+  }
+
+  async getHistoryData() {
+    try {
+      const response = await this.sheets.spreadsheets.values.get({
+        spreadsheetId: SHEET_ID,
+        range: 'History',
+      });
+
+      const data = response.data.values || [];
+      if (data.length < 1) return { rows: [] };
+
+      // Assume first row is header or data starts from row 1
+      const rows = data.map((row, index) => ({
+        rowNumber: index + 1,
+        time: row[0] || '',
+        action: row[1] || '',
+        content: row[2] || ''
+      })).reverse(); // Latest first
+
+      return { rows };
+    } catch (error) {
+      console.error('SheetsClient: getHistoryData Error:', error);
+      throw error;
+    }
+  }
 }
 
 module.exports = new SheetsClient();
