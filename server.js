@@ -62,6 +62,12 @@ app.post('/api/exec', async (req, res) => {
       case 'bulkDelete':
         result = await bulkDelete(req.body.rowNumbers);
         break;
+      case 'addComment':
+        result = await addComment(req.body.rowNumber, req.body.commentText);
+        break;
+      case 'getComments':
+        result = await getComments(req.body.rowNumber);
+        break;
       case 'createGuide':
         result = await createGuide(req.body.guide);
         break;
@@ -349,6 +355,63 @@ async function bulkDelete(rowNumbers) {
   }
 
   return { success: true, message: `Đã xóa ${rowNumbers.length} mục` };
+}
+
+// ==================== COMMENTS ====================
+
+async function addComment(rowNumber, commentText) {
+  if (!rowNumber) throw new Error('Missing rowNumber');
+  if (!commentText || !commentText.trim()) throw new Error('Missing comment text');
+
+  // Read current devNote (column G, index 6)
+  const currentRow = await sheetsClient.getRow(rowNumber);
+  let comments = [];
+  
+  try {
+    if (currentRow[6]) {
+      comments = JSON.parse(currentRow[6]);
+      if (!Array.isArray(comments)) comments = [];
+    }
+  } catch (e) {
+    comments = []; // Invalid JSON, start fresh
+  }
+
+  // Create new comment
+  const now = new Date();
+  const d = now.getDate().toString().padStart(2, '0');
+  const m = (now.getMonth() + 1).toString().padStart(2, '0');
+  const y = now.getFullYear();
+  const h = now.getHours().toString().padStart(2, '0');
+  const min = now.getMinutes().toString().padStart(2, '0');
+  
+  comments.push({
+    text: commentText.trim(),
+    time: `${h}:${min} ${d}/${m}/${y}`,
+    author: 'User'
+  });
+
+  // Write back
+  await sheetsClient.updateCell(rowNumber, 'G', JSON.stringify(comments));
+  
+  return { success: true, message: 'Đã thêm comment!', comments };
+}
+
+async function getComments(rowNumber) {
+  if (!rowNumber) throw new Error('Missing rowNumber');
+
+  const currentRow = await sheetsClient.getRow(rowNumber);
+  let comments = [];
+  
+  try {
+    if (currentRow[6]) {
+      comments = JSON.parse(currentRow[6]);
+      if (!Array.isArray(comments)) comments = [];
+    }
+  } catch (e) {
+    comments = [];
+  }
+
+  return { success: true, comments };
 }
 
 // ==================== GUIDES CRUD ====================
