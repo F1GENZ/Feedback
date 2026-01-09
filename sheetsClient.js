@@ -58,7 +58,8 @@ class SheetsClient {
         message: row[10] || '',
         messageId: row[11] || '',
         imageId: row[12] || '',
-        id: row[13] || ''
+        id: row[13] || '',
+        updatedAt: row[14] || ''
       })).filter(row => row.shop || row.host);
 
       return { headers, rows };
@@ -70,7 +71,7 @@ class SheetsClient {
 
   async getRow(rowNumber) {
     try {
-      const range = `${SHEET_NAME}!A${rowNumber}:N${rowNumber}`;
+      const range = `${SHEET_NAME}!A${rowNumber}:O${rowNumber}`;
       const response = await this.sheets.spreadsheets.values.get({
         spreadsheetId: SHEET_ID,
         range: range,
@@ -101,7 +102,7 @@ class SheetsClient {
   async updateRow(rowNumber, rowArray) {
     // rowNumber is 1-based
     try {
-      const range = `${SHEET_NAME}!A${rowNumber}:N${rowNumber}`;
+      const range = `${SHEET_NAME}!A${rowNumber}:O${rowNumber}`;
       await this.sheets.spreadsheets.values.update({
         spreadsheetId: SHEET_ID,
         range: range,

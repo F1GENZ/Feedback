@@ -169,8 +169,8 @@ async function createFeedback(feedback) {
   const s = now.getSeconds().toString().padStart(2, '0');
   const timestamp = `${h}:${min}:${s} ${d}/${m}/${y}`;
   
-  // Prepare row data (Columns A-N)
-  // A: Deadline, B: Host, C: Shop, D: Link, E: Stage, F: Tags, G: Dev_note, H: Image_note, I: Note, J: Time, K: Message, L: MessageID, M: ImageID, N: ID
+  // Prepare row data (Columns A-O)
+  // A: Deadline, B: Host, C: Shop, D: Link, E: Stage, F: Tags, G: Dev_note, H: Image_note, I: Note, J: Time, K: Message, L: MessageID, M: ImageID, N: ID, O: UpdatedAt
   const row = [
     feedback.deadline || '',        
     feedback.host || '',            
@@ -181,11 +181,12 @@ async function createFeedback(feedback) {
     feedback.devNote || '',         
     '',                             // Image_note
     feedback.note || '',            
-    timestamp,                      
+    timestamp,                      // Time (created)
     feedback.note || '',            // Message (copy of note for now)
     '',                             // MessageID
     '',                             // ImageID
-    crypto.randomUUID()             
+    crypto.randomUUID(),            // ID
+    timestamp                       // UpdatedAt
   ];
 
   const success = await sheetsClient.appendRow(row);
@@ -239,8 +240,8 @@ async function updateFeedback(rowNumber, updates) {
   // A:Deadline, B:Host, C:Shop, D:Link, E:Stage, F:Tags, G:Dev, H:ImgN, I:Note, J:Time, K:Msg, L:MsgID, M:ImgID, N:ID
   
   const newRow = [...currentRowRaw];
-  // Ensure we have enough empty strings
-  while(newRow.length < 14) newRow.push('');
+  // Ensure we have enough empty strings (15 columns: A-O)
+  while(newRow.length < 15) newRow.push('');
   
   if (updates.deadline !== undefined) newRow[0] = updates.deadline;
   if (updates.host !== undefined) newRow[1] = updates.host;
@@ -251,17 +252,35 @@ async function updateFeedback(rowNumber, updates) {
   if (updates.devNote !== undefined) newRow[6] = updates.devNote;
   if (updates.note !== undefined) newRow[8] = updates.note;
   if (updates.message !== undefined) newRow[10] = updates.message;
-  // Keep ID (13) and Time (9) same usually
+  // Keep ID (13) and Time (9) same
+  
+  // Update the updated_at timestamp (column O, index 14)
+  const now = new Date();
+  const d = now.getDate().toString().padStart(2, '0');
+  const m = (now.getMonth() + 1).toString().padStart(2, '0');
+  const y = now.getFullYear();
+  const h = now.getHours().toString().padStart(2, '0');
+  const min = now.getMinutes().toString().padStart(2, '0');
+  const s = now.getSeconds().toString().padStart(2, '0');
+  newRow[14] = `${h}:${min}:${s} ${d}/${m}/${y}`;
   
   await sheetsClient.updateRow(rowNumber, newRow);
   return { success: true, message: 'Cập nhật thành công!' };
 }
 
 async function updateStage(rowNumber, newStage) {
-  // Update Column E (Index 4 in 0-based, or Column E)
-  // sheetsClient.updateCell takes (row, colLetter, val)
+  // Update Column E (Stage) and Column O (UpdatedAt)
+  const now = new Date();
+  const d = now.getDate().toString().padStart(2, '0');
+  const m = (now.getMonth() + 1).toString().padStart(2, '0');
+  const y = now.getFullYear();
+  const h = now.getHours().toString().padStart(2, '0');
+  const min = now.getMinutes().toString().padStart(2, '0');
+  const s = now.getSeconds().toString().padStart(2, '0');
+  const timestamp = `${h}:${min}:${s} ${d}/${m}/${y}`;
   
   await sheetsClient.updateCell(rowNumber, 'E', newStage);
+  await sheetsClient.updateCell(rowNumber, 'O', timestamp);
   return { success: true, message: `Đã cập nhật Stage thành "${newStage}"` };
 }
 
