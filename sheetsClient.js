@@ -191,6 +191,67 @@ class SheetsClient {
       throw error;
     }
   }
+
+  async appendGuideRow(rowArray) {
+    try {
+      await this.sheets.spreadsheets.values.append({
+        spreadsheetId: SHEET_ID,
+        range: 'File Hướng Dẫn',
+        valueInputOption: 'USER_ENTERED',
+        resource: { values: [rowArray] },
+      });
+      return true;
+    } catch (error) {
+      console.error('SheetsClient: appendGuideRow Error:', error);
+      throw error;
+    }
+  }
+
+  async updateGuideRow(rowNumber, rowArray) {
+    try {
+      const range = `File Hướng Dẫn!A${rowNumber}:D${rowNumber}`;
+      await this.sheets.spreadsheets.values.update({
+        spreadsheetId: SHEET_ID,
+        range: range,
+        valueInputOption: 'USER_ENTERED',
+        resource: { values: [rowArray] },
+      });
+      return true;
+    } catch (error) {
+      console.error('SheetsClient: updateGuideRow Error:', error);
+      throw error;
+    }
+  }
+
+  async deleteGuideRow(rowNumber) {
+    try {
+      const spreadsheet = await this.sheets.spreadsheets.get({
+        spreadsheetId: SHEET_ID,
+      });
+      const sheet = spreadsheet.data.sheets.find(s => s.properties.title === 'File Hướng Dẫn');
+      const sheetId = sheet.properties.sheetId;
+
+      await this.sheets.spreadsheets.batchUpdate({
+        spreadsheetId: SHEET_ID,
+        resource: {
+          requests: [{
+            deleteDimension: {
+              range: {
+                sheetId: sheetId,
+                dimension: 'ROWS',
+                startIndex: rowNumber - 1,
+                endIndex: rowNumber
+              }
+            }
+          }]
+        }
+      });
+      return true;
+    } catch (error) {
+      console.error('SheetsClient: deleteGuideRow Error:', error);
+      throw error;
+    }
+  }
 }
 
 module.exports = new SheetsClient();

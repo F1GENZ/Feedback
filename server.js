@@ -56,6 +56,15 @@ app.post('/api/exec', async (req, res) => {
       case 'deleteFeedback':
         result = await deleteFeedback(req.body.rowNumber);
         break;
+      case 'createGuide':
+        result = await createGuide(req.body.guide);
+        break;
+      case 'updateGuide':
+        result = await updateGuide(req.body.rowNumber, req.body.updates);
+        break;
+      case 'deleteGuide':
+        result = await deleteGuide(req.body.rowNumber);
+        break;
       default:
         result = { success: false, message: 'Unknown action: ' + action };
     }
@@ -261,6 +270,48 @@ async function deleteFeedback(rowNumber) {
   
   await sheetsClient.deleteRow(rowNumber);
   return { success: true, message: 'Đã xóa feedback!' };
+}
+
+// ==================== GUIDES CRUD ====================
+
+async function createGuide(guide) {
+  if (!guide) throw new Error('No guide data');
+  
+  // Columns: A: Type, B: Template, C: Link, D: App
+  const row = [
+    guide.type || 'Hướng dẫn',
+    guide.template || '',
+    guide.link || '',
+    guide.app || ''
+  ];
+
+  const success = await sheetsClient.appendGuideRow(row);
+  if (success) {
+    return { success: true, message: 'Đã tạo hướng dẫn thành công!' };
+  } else {
+    throw new Error('Failed to append row');
+  }
+}
+
+async function updateGuide(rowNumber, updates) {
+  if (!rowNumber) throw new Error('Missing rowNumber');
+  
+  const newRow = [
+    updates.type || '',
+    updates.template || '',
+    updates.link || '',
+    updates.app || ''
+  ];
+  
+  await sheetsClient.updateGuideRow(rowNumber, newRow);
+  return { success: true, message: 'Cập nhật thành công!' };
+}
+
+async function deleteGuide(rowNumber) {
+  if (!rowNumber) throw new Error('Missing rowNumber');
+  
+  await sheetsClient.deleteGuideRow(rowNumber);
+  return { success: true, message: 'Đã xóa hướng dẫn!' };
 }
 
 // Start server
