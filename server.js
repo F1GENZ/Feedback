@@ -363,34 +363,51 @@ async function addComment(rowNumber, commentText) {
   if (!rowNumber) throw new Error('Missing rowNumber');
   if (!commentText || !commentText.trim()) throw new Error('Missing comment text');
 
-  // Read current devNote (column G, index 6)
   const currentRow = await sheetsClient.getRow(rowNumber);
   let comments = [];
   
-  try {
-    if (currentRow[6]) {
-      comments = JSON.parse(currentRow[6]);
-      if (!Array.isArray(comments)) comments = [];
+  // Parse existing comments or preserve legacy text
+  const currentContent = currentRow[6] || '';
+  if (currentContent) {
+    if (currentContent.trim().startsWith('[') && currentContent.trim().endsWith(']')) {
+      try {
+        comments = JSON.parse(currentContent);
+        if (!Array.isArray(comments)) comments = [];
+      } catch (e) {
+        comments = [];
+      }
+    } else {
+      // Treat properly as legacy note
+      comments.push({
+        text: currentContent,
+        time: 'Note cũ',
+        author: 'System'
+      });
     }
-  } catch (e) {
-    comments = []; // Invalid JSON, start fresh
   }
 
-  // Create new comment
+  // Create new comment with VN Timezone
   const now = new Date();
-  const d = now.getDate().toString().padStart(2, '0');
-  const m = (now.getMonth() + 1).toString().padStart(2, '0');
-  const y = now.getFullYear();
-  const h = now.getHours().toString().padStart(2, '0');
-  const min = now.getMinutes().toString().padStart(2, '0');
+  const options = { timeZone: 'Asia/Ho_Chi_Minh', hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit', year: 'numeric', hour12: false };
+  // Format: "22:30 09/01/2026"
+  // toLocaleString returns "22:30:00 09/01/2026" or similar depending on locale, let's normalize
+  const timeStr = now.toLocaleString('vi-VN', options).replace(/:\d{2} /, ' '); 
+  // Simplified manual formatting to ensure consistency if needed, but locale vi-VN is usually good.
+  // Actually, let's stick to the previous format "HH:mm dd/MM/yyyy"
+  const vnTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' }));
+  const d = vnTime.getDate().toString().padStart(2, '0');
+  const m = (vnTime.getMonth() + 1).toString().padStart(2, '0');
+  const y = vnTime.getFullYear();
+  const h = vnTime.getHours().toString().padStart(2, '0');
+  const min = vnTime.getMinutes().toString().padStart(2, '0');
+  const timestamp = `${h}:${min} ${d}/${m}/${y}`;
   
   comments.push({
     text: commentText.trim(),
-    time: `${h}:${min} ${d}/${m}/${y}`,
+    time: timestamp,
     author: 'User'
   });
 
-  // Write back
   await sheetsClient.updateCell(rowNumber, 'G', JSON.stringify(comments));
   
   return { success: true, message: 'Đã thêm comment!', comments };
@@ -402,13 +419,22 @@ async function getComments(rowNumber) {
   const currentRow = await sheetsClient.getRow(rowNumber);
   let comments = [];
   
-  try {
-    if (currentRow[6]) {
-      comments = JSON.parse(currentRow[6]);
-      if (!Array.isArray(comments)) comments = [];
+  const currentContent = currentRow[6] || '';
+  if (currentContent) {
+    if (currentContent.trim().startsWith('[') && currentContent.trim().endsWith(']')) {
+      try {
+        comments = JSON.parse(currentContent);
+        if (!Array.isArray(comments)) comments = [];
+      } catch (e) {
+        comments = [];
+      }
+    } else {
+      comments.push({
+        text: currentContent,
+        time: 'Note cũ',
+        author: 'System'
+      });
     }
-  } catch (e) {
-    comments = [];
   }
 
   return { success: true, comments };
