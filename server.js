@@ -56,6 +56,12 @@ app.post('/api/exec', async (req, res) => {
       case 'deleteFeedback':
         result = await deleteFeedback(req.body.rowNumber);
         break;
+      case 'bulkUpdateStage':
+        result = await bulkUpdateStage(req.body.rowNumbers, req.body.newStage);
+        break;
+      case 'bulkDelete':
+        result = await bulkDelete(req.body.rowNumbers);
+        break;
       case 'createGuide':
         result = await createGuide(req.body.guide);
         break;
@@ -303,6 +309,46 @@ async function deleteFeedback(rowNumber) {
   await sheetsClient.deleteRow(rowNumber);
   // await sheetsClient.logHistory('DELETE', `Xóa row ${rowNumber}`); // DISABLED
   return { success: true, message: 'Đã xóa feedback!' };
+}
+
+// ==================== BULK ACTIONS ====================
+
+async function bulkUpdateStage(rowNumbers, newStage) {
+  if (!rowNumbers || !Array.isArray(rowNumbers) || rowNumbers.length === 0) {
+    throw new Error('Missing or invalid rowNumbers');
+  }
+  if (!newStage) throw new Error('Missing newStage');
+
+  const now = new Date();
+  const d = now.getDate().toString().padStart(2, '0');
+  const m = (now.getMonth() + 1).toString().padStart(2, '0');
+  const y = now.getFullYear();
+  const h = now.getHours().toString().padStart(2, '0');
+  const min = now.getMinutes().toString().padStart(2, '0');
+  const s = now.getSeconds().toString().padStart(2, '0');
+  const timestamp = `${h}:${min}:${s} ${d}/${m}/${y}`;
+
+  for (const rowNumber of rowNumbers) {
+    await sheetsClient.updateCell(rowNumber, 'E', newStage);
+    await sheetsClient.updateCell(rowNumber, 'O', timestamp);
+  }
+
+  return { success: true, message: `Đã cập nhật ${rowNumbers.length} mục thành "${newStage}"` };
+}
+
+async function bulkDelete(rowNumbers) {
+  if (!rowNumbers || !Array.isArray(rowNumbers) || rowNumbers.length === 0) {
+    throw new Error('Missing or invalid rowNumbers');
+  }
+
+  // Sort descending to delete from bottom up (prevents row shifting issues)
+  const sorted = [...rowNumbers].sort((a, b) => b - a);
+  
+  for (const rowNumber of sorted) {
+    await sheetsClient.deleteRow(rowNumber);
+  }
+
+  return { success: true, message: `Đã xóa ${rowNumbers.length} mục` };
 }
 
 // ==================== GUIDES CRUD ====================
