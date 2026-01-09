@@ -41,6 +41,9 @@ app.post('/api/exec', async (req, res) => {
       case 'getDashboardData':
         result = await getDashboardData();
         break;
+      case 'getGuidesData':
+        result = await getGuidesData();
+        break;
       case 'createFeedback':
         result = await createFeedback(req.body.feedback);
         break;
@@ -76,6 +79,9 @@ app.get('/api/exec', async (req, res) => {
     switch (action) {
       case 'getDashboardData':
         result = await getDashboardData();
+        break;
+      case 'getGuidesData':
+        result = await getGuidesData();
         break;
       default:
         result = { success: false, message: 'Unknown action or use POST: ' + action };
@@ -120,6 +126,24 @@ async function getDashboardData() {
     },
     filterOptions: { hosts, stages },
     feedback: rows
+  };
+}
+
+async function getGuidesData() {
+  const data = await sheetsClient.getGuidesData();
+  const rows = data.rows || [];
+
+  // Group by type
+  const grouped = {};
+  rows.forEach(row => {
+    if (!grouped[row.type]) grouped[row.type] = [];
+    grouped[row.type].push(row);
+  });
+
+  return {
+    success: true,
+    guides: rows,
+    groupedGuides: grouped
   };
 }
 

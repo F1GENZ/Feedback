@@ -162,6 +162,35 @@ class SheetsClient {
       throw error;
     }
   }
+
+  async getGuidesData() {
+    try {
+      const response = await this.sheets.spreadsheets.values.get({
+        spreadsheetId: SHEET_ID,
+        range: 'File Hướng Dẫn',
+      });
+
+      const data = response.data.values || [];
+      if (data.length < 2) return { rows: [] };
+
+      // Row 1 is header
+      const rowsRaw = data.slice(1);
+
+      // Map rows: Type, Template, Link, App
+      const rows = rowsRaw.map((row, index) => ({
+        rowNumber: index + 2,
+        type: row[0] || '',
+        template: row[1] || '',
+        link: row[2] || '',
+        app: row[3] || ''
+      })).filter(row => row.template || row.link);
+
+      return { rows };
+    } catch (error) {
+      console.error('SheetsClient: getGuidesData Error:', error);
+      throw error;
+    }
+  }
 }
 
 module.exports = new SheetsClient();
