@@ -229,6 +229,9 @@ class SheetsClient {
         spreadsheetId: SHEET_ID,
       });
       const sheet = spreadsheet.data.sheets.find(s => s.properties.title === 'File Hướng Dẫn');
+      if (!sheet) {
+        throw new Error('Sheet "File Hướng Dẫn" not found');
+      }
       const sheetId = sheet.properties.sheetId;
 
       await this.sheets.spreadsheets.batchUpdate({
