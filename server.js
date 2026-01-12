@@ -117,6 +117,42 @@ app.get('/api/exec', async (req, res) => {
   }
 });
 
+// Telegram Image Proxy Endpoint
+app.get('/api/telegram-image', async (req, res) => {
+  const fileId = req.query.fileId;
+  
+  if (!fileId) {
+    return res.json({ success: false, message: 'Missing fileId parameter' });
+  }
+  
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  if (!botToken) {
+    return res.json({ success: false, message: 'Telegram bot token not configured' });
+  }
+  
+  try {
+    // Get file info from Telegram
+    const response = await fetch(`https://api.telegram.org/bot${botToken}/getFile?file_id=${fileId}`);
+    const data = await response.json();
+    
+    if (!data.ok) {
+      return res.json({ success: false, message: 'Failed to get file from Telegram: ' + (data.description || 'Unknown error') });
+    }
+    
+    const filePath = data.result.file_path;
+    const fileUrl = `https://api.telegram.org/file/bot${botToken}/${filePath}`;
+    
+    return res.json({ 
+      success: true, 
+      url: fileUrl,
+      fileId: fileId
+    });
+  } catch (error) {
+    console.error('Telegram API Error:', error);
+    return res.json({ success: false, message: error.message });
+  }
+});
+
 // Helper Functions
 
 async function getDashboardData() {
