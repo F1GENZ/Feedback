@@ -77,6 +77,9 @@ app.post('/api/exec', async (req, res) => {
       case 'deleteGuide':
         result = await deleteGuide(req.body.rowNumber);
         break;
+      case 'deleteComment':
+        result = await deleteComment(req.body.rowNumber, req.body.commentIndex);
+        break;
       default:
         result = { success: false, message: 'Unknown action: ' + action };
     }
@@ -474,6 +477,34 @@ async function getComments(rowNumber) {
   }
 
   return { success: true, comments };
+}
+
+async function deleteComment(rowNumber, commentIndex) {
+  if (!rowNumber) throw new Error('Missing rowNumber');
+  if (commentIndex === undefined || commentIndex === null) throw new Error('Missing commentIndex');
+
+  const currentRow = await sheetsClient.getRow(rowNumber);
+  let comments = [];
+  
+  const currentContent = currentRow[6] || '';
+  if (currentContent) {
+    if (currentContent.trim().startsWith('[') && currentContent.trim().endsWith(']')) {
+      try {
+        comments = JSON.parse(currentContent);
+        if (!Array.isArray(comments)) comments = [];
+      } catch (e) {
+        comments = [];
+      }
+    }
+  }
+
+  if (commentIndex >= 0 && commentIndex < comments.length) {
+    comments.splice(commentIndex, 1);
+    await sheetsClient.updateCell(rowNumber, 'G', JSON.stringify(comments));
+    return { success: true, message: 'Deleted comment!', comments };
+  } else {
+    return { success: false, message: 'Invalid comment index' };
+  }
 }
 
 // ==================== GUIDES CRUD ====================
