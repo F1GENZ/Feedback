@@ -2,14 +2,13 @@ const express = require('express');
 const cors = require('cors');
 const sheetsClient = require('./sheetsClient');
 const crypto = require('crypto');
-const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 require('dotenv').config();
 
 const app = express();
 
 // Middleware
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 
 // API Key Middleware
 app.use('/api', (req, res, next) => {
@@ -150,61 +149,6 @@ app.get('/api/telegram-image', async (req, res) => {
     });
   } catch (error) {
     console.error('Telegram API Error:', error);
-    return res.json({ success: false, message: error.message });
-  }
-});
-
-// R2 Client Setup
-const r2Client = new S3Client({
-  region: 'auto',
-  endpoint: `https://${process.env.CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-  credentials: {
-    accessKeyId: process.env.CLOUDFLARE_R2_ACCESS_KEY_ID,
-    secretAccessKey: process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY,
-  },
-});
-
-// Upload Image to R2
-app.post('/api/upload-image', async (req, res) => {
-  try {
-    const { imageData } = req.body;
-    
-    if (!imageData || !imageData.startsWith('data:image')) {
-      return res.json({ success: false, message: 'Invalid image data' });
-    }
-    
-    // Parse base64
-    const matches = imageData.match(/^data:image\/(\w+);base64,(.+)$/);
-    if (!matches) {
-      return res.json({ success: false, message: 'Invalid image format' });
-    }
-    
-    const imageType = matches[1];
-    const base64Data = matches[2];
-    const buffer = Buffer.from(base64Data, 'base64');
-    
-    // Generate unique filename
-    const filename = `comments/${Date.now()}-${crypto.randomUUID()}.${imageType}`;
-    
-    // Upload to R2
-    const command = new PutObjectCommand({
-      Bucket: process.env.CLOUDFLARE_R2_BUCKET_NAME,
-      Key: filename,
-      Body: buffer,
-      ContentType: `image/${imageType}`,
-    });
-    
-    await r2Client.send(command);
-    
-    // Return public URL
-    const publicUrl = `${process.env.CLOUDFLARE_CDN_URL}/${filename}`;
-    
-    return res.json({ 
-      success: true, 
-      url: publicUrl
-    });
-  } catch (error) {
-    console.error('R2 Upload Error:', error);
     return res.json({ success: false, message: error.message });
   }
 });
