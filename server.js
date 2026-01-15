@@ -232,22 +232,22 @@ async function createFeedback(feedback) {
   const timestamp = `${h}:${min}:${s} ${d}/${m}/${y}`;
   
   // Prepare row data (Columns A-O)
-  // A: Deadline, B: Host, C: Shop, D: Link, E: Stage, F: Tags, G: Dev_note, H: Image_note, I: Note, J: Time, K: Message, L: MessageID, M: ImageID, N: ID, O: UpdatedAt
+  // A: ID, B: Deadline, C: Host, D: Shop, E: Link, F: Stage, G: Tags, H: Dev_note, I: Image_note, J: Note, K: Time, L: Message, M: MessageID, N: ImageID, O: UpdatedAt
   const row = [
-    feedback.deadline || '',        
-    feedback.host || '',            
-    feedback.shop || '',            
-    feedback.link || '',            
-    feedback.stage || 'Feedback',   
-    feedback.tags || '',            
-    feedback.devNote || '',         
+    Date.now().toString(),          // ID (timestamp)
+    feedback.deadline || '',        // Deadline
+    feedback.host || '',            // Host
+    feedback.shop || '',            // Shop
+    feedback.link || '',            // Link
+    feedback.stage || 'Feedback',   // Stage
+    feedback.tags || '',            // Tags
+    feedback.devNote || '',         // Dev_note
     '',                             // Image_note
-    feedback.note || '',            
+    feedback.note || '',            // Note
     timestamp,                      // Time (created)
     feedback.note || '',            // Message (copy of note for now)
     '',                             // MessageID
     '',                             // ImageID
-    crypto.randomUUID(),            // ID
     timestamp                       // UpdatedAt
   ];
 
@@ -299,23 +299,24 @@ async function updateFeedback(rowNumber, updates) {
   if (!currentRowRaw) throw new Error('Row not found');
   
   // Merge logic
-  // Columns: A-N (0-13)
-  // A:Deadline, B:Host, C:Shop, D:Link, E:Stage, F:Tags, G:Dev, H:ImgN, I:Note, J:Time, K:Msg, L:MsgID, M:ImgID, N:ID
+  // Columns: A-O (0-14)
+  // A:ID, B:Deadline, C:Host, D:Shop, E:Link, F:Stage, G:Tags, H:Dev, I:ImgN, J:Note, K:Time, L:Msg, M:MsgID, N:ImgID, O:UpdatedAt
   
   const newRow = [...currentRowRaw];
   // Ensure we have enough empty strings (15 columns: A-O)
   while(newRow.length < 15) newRow.push('');
   
-  if (updates.deadline !== undefined) newRow[0] = updates.deadline;
-  if (updates.host !== undefined) newRow[1] = updates.host;
-  if (updates.shop !== undefined) newRow[2] = updates.shop;
-  if (updates.link !== undefined) newRow[3] = updates.link;
-  if (updates.stage !== undefined) newRow[4] = updates.stage;
-  if (updates.tags !== undefined) newRow[5] = updates.tags;
-  if (updates.devNote !== undefined) newRow[6] = updates.devNote;
-  if (updates.note !== undefined) newRow[8] = updates.note;
-  if (updates.message !== undefined) newRow[10] = updates.message;
-  // Keep ID (13) and Time (9) same
+  // Keep ID (0) same
+  if (updates.deadline !== undefined) newRow[1] = updates.deadline;
+  if (updates.host !== undefined) newRow[2] = updates.host;
+  if (updates.shop !== undefined) newRow[3] = updates.shop;
+  if (updates.link !== undefined) newRow[4] = updates.link;
+  if (updates.stage !== undefined) newRow[5] = updates.stage;
+  if (updates.tags !== undefined) newRow[6] = updates.tags;
+  if (updates.devNote !== undefined) newRow[7] = updates.devNote;
+  if (updates.note !== undefined) newRow[9] = updates.note;
+  if (updates.message !== undefined) newRow[11] = updates.message;
+  // Keep Time (10) same
   
   // Update the updated_at timestamp (column O, index 14)
   const now = new Date();
@@ -332,7 +333,7 @@ async function updateFeedback(rowNumber, updates) {
 }
 
 async function updateStage(rowNumber, newStage) {
-  // Update Column E (Stage) and Column O (UpdatedAt)
+  // Update Column F (Stage) and Column O (UpdatedAt)
   const now = new Date();
   const d = now.getDate().toString().padStart(2, '0');
   const m = (now.getMonth() + 1).toString().padStart(2, '0');
@@ -342,7 +343,7 @@ async function updateStage(rowNumber, newStage) {
   const s = now.getSeconds().toString().padStart(2, '0');
   const timestamp = `${h}:${min}:${s} ${d}/${m}/${y}`;
   
-  await sheetsClient.updateCell(rowNumber, 'E', newStage);
+  await sheetsClient.updateCell(rowNumber, 'F', newStage);
   await sheetsClient.updateCell(rowNumber, 'O', timestamp);
   // await sheetsClient.logHistory('UPDATE_STAGE', `Row ${rowNumber} -> ${newStage}`); // DISABLED
   return { success: true, message: `Đã cập nhật Stage thành "${newStage}"` };
@@ -374,7 +375,7 @@ async function bulkUpdateStage(rowNumbers, newStage) {
   const timestamp = `${h}:${min}:${s} ${d}/${m}/${y}`;
 
   for (const rowNumber of rowNumbers) {
-    await sheetsClient.updateCell(rowNumber, 'E', newStage);
+    await sheetsClient.updateCell(rowNumber, 'F', newStage);
     await sheetsClient.updateCell(rowNumber, 'O', timestamp);
   }
 
@@ -406,7 +407,7 @@ async function addComment(rowNumber, commentText) {
   let comments = [];
   
   // Parse existing comments or preserve legacy text
-  const currentContent = currentRow[6] || '';
+  const currentContent = currentRow[7] || '';
   if (currentContent) {
     if (currentContent.trim().startsWith('[') && currentContent.trim().endsWith(']')) {
       try {
@@ -447,7 +448,7 @@ async function addComment(rowNumber, commentText) {
     author: 'User'
   });
 
-  await sheetsClient.updateCell(rowNumber, 'G', JSON.stringify(comments));
+  await sheetsClient.updateCell(rowNumber, 'H', JSON.stringify(comments));
   
   return { success: true, message: 'Đã thêm comment!', comments };
 }
@@ -458,7 +459,7 @@ async function getComments(rowNumber) {
   const currentRow = await sheetsClient.getRow(rowNumber);
   let comments = [];
   
-  const currentContent = currentRow[6] || '';
+  const currentContent = currentRow[7] || '';
   if (currentContent) {
     if (currentContent.trim().startsWith('[') && currentContent.trim().endsWith(']')) {
       try {
@@ -486,7 +487,7 @@ async function deleteComment(rowNumber, commentIndex) {
   const currentRow = await sheetsClient.getRow(rowNumber);
   let comments = [];
   
-  const currentContent = currentRow[6] || '';
+  const currentContent = currentRow[7] || '';
   if (currentContent) {
     if (currentContent.trim().startsWith('[') && currentContent.trim().endsWith(']')) {
       try {
@@ -500,7 +501,7 @@ async function deleteComment(rowNumber, commentIndex) {
 
   if (commentIndex >= 0 && commentIndex < comments.length) {
     comments.splice(commentIndex, 1);
-    await sheetsClient.updateCell(rowNumber, 'G', JSON.stringify(comments));
+    await sheetsClient.updateCell(rowNumber, 'H', JSON.stringify(comments));
     return { success: true, message: 'Deleted comment!', comments };
   } else {
     return { success: false, message: 'Invalid comment index' };

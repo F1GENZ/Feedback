@@ -42,23 +42,23 @@ class SheetsClient {
       const headers = data[0]; 
       const rowsRaw = data.slice(2); 
 
-      // Map rows roughly matching Code.gs logic
+      // Map rows - Column order: A:ID, B:Deadline, C:Host, D:Shop, E:Link, F:Stage, G:Tags, H:Dev_note, I:Image_note, J:Note, K:Time, L:Message, M:MessageID, N:ImageID, O:UpdatedAt
       const rows = rowsRaw.map((row, index) => ({
         rowNumber: index + 3, // 1-based index, skipping 2 header rows
-        deadline: row[0] || '',
-        host: row[1] || '',
-        shop: row[2] || '',
-        link: row[3] || '',
-        stage: row[4] || '',
-        tags: row[5] || '',
-        devNote: row[6] || '',
-        imageNote: row[7] || '',
-        note: row[8] || '',
-        time: row[9] || '',
-        message: row[10] || '',
-        messageId: row[11] || '',
-        imageId: row[12] || '',
-        id: row[13] || '',
+        id: row[0] || '',
+        deadline: row[1] || '',
+        host: row[2] || '',
+        shop: row[3] || '',
+        link: row[4] || '',
+        stage: row[5] || '',
+        tags: row[6] || '',
+        devNote: row[7] || '',
+        imageNote: row[8] || '',
+        note: row[9] || '',
+        time: row[10] || '',
+        message: row[11] || '',
+        messageId: row[12] || '',
+        imageId: row[13] || '',
         updatedAt: row[14] || ''
       })).filter(row => row.shop || row.host);
 
