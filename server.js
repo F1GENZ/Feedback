@@ -221,14 +221,15 @@ async function getHistory() {
 async function createFeedback(feedback) {
   if (!feedback) throw new Error('No feedback data');
   
+  // Use Vietnam timezone
   const now = new Date();
-  // Format: HH:mm:ss dd/MM/yyyy (Manual formatting to ensure consistency)
-  const d = now.getDate().toString().padStart(2, '0');
-  const m = (now.getMonth() + 1).toString().padStart(2, '0');
-  const y = now.getFullYear();
-  const h = now.getHours().toString().padStart(2, '0');
-  const min = now.getMinutes().toString().padStart(2, '0');
-  const s = now.getSeconds().toString().padStart(2, '0');
+  const vnTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' }));
+  const d = vnTime.getDate().toString().padStart(2, '0');
+  const m = (vnTime.getMonth() + 1).toString().padStart(2, '0');
+  const y = vnTime.getFullYear();
+  const h = vnTime.getHours().toString().padStart(2, '0');
+  const min = vnTime.getMinutes().toString().padStart(2, '0');
+  const s = vnTime.getSeconds().toString().padStart(2, '0');
   const timestamp = `${h}:${min}:${s} ${d}/${m}/${y}`;
   
   // Prepare row data (Columns A-O)
@@ -320,12 +321,13 @@ async function updateFeedback(rowNumber, updates) {
   
   // Update the updated_at timestamp (column O, index 14)
   const now = new Date();
-  const d = now.getDate().toString().padStart(2, '0');
-  const m = (now.getMonth() + 1).toString().padStart(2, '0');
-  const y = now.getFullYear();
-  const h = now.getHours().toString().padStart(2, '0');
-  const min = now.getMinutes().toString().padStart(2, '0');
-  const s = now.getSeconds().toString().padStart(2, '0');
+  const vnTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' }));
+  const d = vnTime.getDate().toString().padStart(2, '0');
+  const m = (vnTime.getMonth() + 1).toString().padStart(2, '0');
+  const y = vnTime.getFullYear();
+  const h = vnTime.getHours().toString().padStart(2, '0');
+  const min = vnTime.getMinutes().toString().padStart(2, '0');
+  const s = vnTime.getSeconds().toString().padStart(2, '0');
   newRow[14] = `${h}:${min}:${s} ${d}/${m}/${y}`;
   
   await sheetsClient.updateRow(rowNumber, newRow);
@@ -335,12 +337,13 @@ async function updateFeedback(rowNumber, updates) {
 async function updateStage(rowNumber, newStage) {
   // Update Column F (Stage) and Column O (UpdatedAt)
   const now = new Date();
-  const d = now.getDate().toString().padStart(2, '0');
-  const m = (now.getMonth() + 1).toString().padStart(2, '0');
-  const y = now.getFullYear();
-  const h = now.getHours().toString().padStart(2, '0');
-  const min = now.getMinutes().toString().padStart(2, '0');
-  const s = now.getSeconds().toString().padStart(2, '0');
+  const vnTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' }));
+  const d = vnTime.getDate().toString().padStart(2, '0');
+  const m = (vnTime.getMonth() + 1).toString().padStart(2, '0');
+  const y = vnTime.getFullYear();
+  const h = vnTime.getHours().toString().padStart(2, '0');
+  const min = vnTime.getMinutes().toString().padStart(2, '0');
+  const s = vnTime.getSeconds().toString().padStart(2, '0');
   const timestamp = `${h}:${min}:${s} ${d}/${m}/${y}`;
   
   await sheetsClient.updateCell(rowNumber, 'F', newStage);
@@ -366,12 +369,13 @@ async function bulkUpdateStage(rowNumbers, newStage) {
   if (!newStage) throw new Error('Missing newStage');
 
   const now = new Date();
-  const d = now.getDate().toString().padStart(2, '0');
-  const m = (now.getMonth() + 1).toString().padStart(2, '0');
-  const y = now.getFullYear();
-  const h = now.getHours().toString().padStart(2, '0');
-  const min = now.getMinutes().toString().padStart(2, '0');
-  const s = now.getSeconds().toString().padStart(2, '0');
+  const vnTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' }));
+  const d = vnTime.getDate().toString().padStart(2, '0');
+  const m = (vnTime.getMonth() + 1).toString().padStart(2, '0');
+  const y = vnTime.getFullYear();
+  const h = vnTime.getHours().toString().padStart(2, '0');
+  const min = vnTime.getMinutes().toString().padStart(2, '0');
+  const s = vnTime.getSeconds().toString().padStart(2, '0');
   const timestamp = `${h}:${min}:${s} ${d}/${m}/${y}`;
 
   for (const rowNumber of rowNumbers) {
