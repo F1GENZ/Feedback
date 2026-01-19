@@ -354,13 +354,16 @@ async function sendTelegramMessage(chatId, text, options = {}) {
 // Send photo to Telegram
 async function sendTelegramPhoto(chatId, fileId, caption = '', options = {}) {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  const oldBotToken = process.env.TELEGRAM_IMAGE_BOT_TOKEN;
+  
   if (!botToken) {
     console.error('TELEGRAM_BOT_TOKEN not configured');
     return;
   }
   
+  // Try with current bot token first
   try {
-    await fetch(`https://api.telegram.org/bot${botToken}/sendPhoto`, {
+    const response = await fetch(`https://api.telegram.org/bot${botToken}/sendPhoto`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -370,6 +373,31 @@ async function sendTelegramPhoto(chatId, fileId, caption = '', options = {}) {
         ...options
       })
     });
+    
+    const result = await response.json();
+    if (result.ok) return; // Success
+    
+    // If failed and we have old token, try with old bot
+    if (!result.ok && oldBotToken) {
+      console.log('Trying with old bot token...');
+      const oldResponse = await fetch(`https://api.telegram.org/bot${oldBotToken}/sendPhoto`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          photo: fileId,
+          caption: caption,
+          ...options
+        })
+      });
+      
+      const oldResult = await oldResponse.json();
+      if (oldResult.ok) return; // Success with old bot
+      
+      throw new Error(`Both tokens failed: ${result.description}, ${oldResult.description}`);
+    }
+    
+    throw new Error(result.description || 'Failed to send photo');
   } catch (error) {
     console.error('Failed to send Telegram photo:', error);
     throw error; // Re-throw to trigger fallback
