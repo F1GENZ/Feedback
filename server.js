@@ -810,6 +810,7 @@ async function updateStage(rowNumber, newStage) {
   
   // Notify host if stage changed to Feedback
   if (newStage === 'Feedback' && host) {
+    console.log(`[Notification] Stage changed to Feedback for host: ${host}`);
     await notifyHostFeedbackCount(host);
   }
   
