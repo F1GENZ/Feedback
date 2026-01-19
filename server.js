@@ -121,18 +121,25 @@ app.post('/api/telegram-webhook', async (req, res) => {
         return res.json({ ok: true });
       }
       
-      // Send each feedback as a separate message with rowNumber for reply tracking
-      for (const fb of userFeedbacks) {
+      // Show typing indicator
+      await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendChatAction`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, action: 'typing' })
+      });
+      
+      // Prepare all messages
+      const messages = userFeedbacks.map(fb => {
         const shop = fb.shop || 'N/A';
         let note = fb.note || fb.message || '';
         
-        // Truncate note if too long (Telegram limit 4096 chars)
+        // Truncate note if too long
         const MAX_NOTE_LENGTH = 500;
         if (note.length > MAX_NOTE_LENGTH) {
           note = note.substring(0, MAX_NOTE_LENGTH) + '... (quá dài, xem trên Dashboard)';
         }
         
-        // Send everything as plain text in one message (no markdown to avoid parsing errors)
+        // Build message
         let msg = `• ID: #${fb.rowNumber}\n`;
         msg += `• Shop: ${shop}\n`;
         msg += `• File: ${fb.link || 'KHÔNG có file'}`;
@@ -140,14 +147,14 @@ app.post('/api/telegram-webhook', async (req, res) => {
           msg += `\n• Note: ${note}`;
         }
         
-        try {
-          await sendTelegramMessage(chatId, msg, { 
-            disable_web_page_preview: true
-          });
-        } catch (error) {
-          console.error(`Failed to send feedback #${fb.rowNumber}:`, error.message);
-        }
-      }
+        return { chatId, msg };
+      });
+      
+      // Send all messages in parallel (faster)
+      await Promise.all(messages.map(({ chatId, msg }) => 
+        sendTelegramMessage(chatId, msg, { disable_web_page_preview: true })
+          .catch(err => console.error('Send error:', err.message))
+      ));
       
       return res.json({ ok: true });
     }
