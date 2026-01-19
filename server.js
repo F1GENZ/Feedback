@@ -150,7 +150,7 @@ app.post('/api/telegram-webhook', async (req, res) => {
         return msg;
       });
       
-      // Send in batches to avoid rate limit (10 messages per batch, 100ms delay)
+      // Send in batches to avoid rate limit (10 messages per batch, 3s delay)
       const BATCH_SIZE = 10;
       for (let i = 0; i < messages.length; i += BATCH_SIZE) {
         const batch = messages.slice(i, i + BATCH_SIZE);
@@ -159,9 +159,9 @@ app.post('/api/telegram-webhook', async (req, res) => {
             .catch(err => console.error('Send error:', err.message))
         ));
         
-        // Small delay between batches
+        // Delay between batches to respect rate limit
         if (i + BATCH_SIZE < messages.length) {
-          await new Promise(resolve => setTimeout(resolve, 100));
+          await new Promise(resolve => setTimeout(resolve, 3000));
         }
       }
       
