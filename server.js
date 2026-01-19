@@ -176,9 +176,9 @@ app.post('/api/telegram-webhook', async (req, res) => {
       return res.json({ ok: true });
     }
     
-    // Handle reply to feedback messages (with ID in text)
+    // Handle reply to feedback messages (with ID in text or caption for photos)
     if (message.reply_to_message) {
-      const originalText = message.reply_to_message.text || '';
+      const originalText = message.reply_to_message.text || message.reply_to_message.caption || '';
       
       // Extract rowNumber from #123 pattern
       const match = originalText.match(/#(\d+)/);
