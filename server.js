@@ -291,12 +291,13 @@ app.post('/api/telegram-webhook', async (req, res) => {
         `📚 *Hướng dẫn sử dụng Bot*\n\n` +
         `*📋 Xem feedback:*\n` +
         `• \`//\` - Xem feedback của bạn\n` +
-        `• \`// [tên]\` - Xem feedback của người khác\n` +
-        `  Ví dụ: \`// lam\`, \`// quoc\`, \`// taiz\`\n\n` +
+        `• \`// Tên\` - Xem feedback của người khác\n` +
         `*✅ Xử lý feedback:*\n` +
         `• Reply tin nhắn feedback với \`Done\` - Đánh dấu hoàn thành\n` +
         `• Reply với text/ảnh khác - Thêm comment\n\n` +
         `*🔧 Lệnh khác:*\n` +
+        `• \`/myid\` - Xem User ID của bạn\n` +
+        `• \`/groupid\` - Xem Group ID (dùng trong group)\n` +
         `• \`/start\` - Bắt đầu\n` +
         `• \`/help\` - Xem hướng dẫn này`,
         { parse_mode: 'Markdown' }
