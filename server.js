@@ -138,22 +138,24 @@ app.post('/api/telegram-webhook', async (req, res) => {
         // Make shop name clickable (assuming shop is a URL)
         const shopLink = shop.startsWith('http') ? `[${shop}](https://${shop})` : `[${shop}](https://${shop})`;
         
-        // Simple format with ID at top
-        let msg = `• ID: #${fb.rowNumber}\n`;
-        msg += `• Shop: ${shopLink}\n`;
-        msg += `• File: ${fileStatus}`;
-        if (note) {
-          msg += `\n• Note: ${note}`;
-        }
-        
         try {
+          // Send links with markdown
+          let msg = `• ID: #${fb.rowNumber}\n`;
+          msg += `• Shop: ${shopLink}\n`;
+          msg += `• File: ${fileStatus}`;
+          
           await sendTelegramMessage(chatId, msg, { 
             parse_mode: 'Markdown', 
             disable_web_page_preview: true
           });
+          
+          // Send note as separate plain text message if exists
+          if (note) {
+            await sendTelegramMessage(chatId, `• Note: ${note}`);
+          }
         } catch (error) {
           console.error(`Failed to send feedback #${fb.rowNumber}:`, error.message);
-          // Fallback: send without markdown
+          // Fallback: send everything as plain text
           const plainMsg = `• ID: #${fb.rowNumber}\n• Shop: ${shop}\n• File: ${fb.link || 'KHÔNG có file'}${note ? '\n• Note: ' + note : ''}`;
           await sendTelegramMessage(chatId, plainMsg);
         }
@@ -240,18 +242,21 @@ app.post('/api/telegram-webhook', async (req, res) => {
                 // Make shop name clickable
                 const shopLink = shopName.startsWith('http') ? `[${shopName}](https://${shopName})` : `[${shopName}](https://${shopName})`;
                 
-                let msg = `• ID: #${fb.rowNumber}\n`;
-                msg += `• Shop: ${shopLink}\n`;
-                msg += `• File: ${fileStatus}`;
-                if (noteText) {
-                  msg += `\n• Note: ${noteText}`;
-                }
-                
                 try {
+                  // Send links with markdown
+                  let msg = `• ID: #${fb.rowNumber}\n`;
+                  msg += `• Shop: ${shopLink}\n`;
+                  msg += `• File: ${fileStatus}`;
+                  
                   await sendTelegramMessage(chatId, msg, { 
                     parse_mode: 'Markdown', 
                     disable_web_page_preview: true
                   });
+                  
+                  // Send note as separate plain text message
+                  if (noteText) {
+                    await sendTelegramMessage(chatId, `• Note: ${noteText}`);
+                  }
                 } catch (error) {
                   console.error(`Failed to send feedback #${fb.rowNumber}:`, error.message);
                   const plainMsg = `• ID: #${fb.rowNumber}\n• Shop: ${shopName}\n• File: ${fb.link || 'KHÔNG có file'}${noteText ? '\n• Note: ' + noteText : ''}`;
