@@ -108,9 +108,12 @@ app.post('/api/telegram-webhook', async (req, res) => {
         // Check if has link - make File Feedback clickable
         const fileStatus = fb.link ? `[File Feedback](${fb.link})` : 'KHÔNG có file';
         
+        // Make shop name clickable (assuming shop is a URL)
+        const shopLink = shop.startsWith('http') ? `[${shop}](https://${shop})` : `[${shop}](https://${shop})`;
+        
         // Simple format with ID at top
         let msg = `• ID: #${fb.rowNumber}\n`;
-        msg += `• Shop: \`${shop}\`\n`;
+        msg += `• Shop: ${shopLink}\n`;
         msg += `• File: ${fileStatus}`;
         if (note) {
           msg += `\n• Note: ${note}`;
@@ -189,8 +192,11 @@ app.post('/api/telegram-webhook', async (req, res) => {
                 const noteText = fb.note || fb.message || '';
                 const fileStatus = fb.link ? `[File Feedback](${fb.link})` : 'KHÔNG có file';
                 
+                // Make shop name clickable
+                const shopLink = shopName.startsWith('http') ? `[${shopName}](https://${shopName})` : `[${shopName}](https://${shopName})`;
+                
                 let msg = `• ID: #${fb.rowNumber}\n`;
-                msg += `• Shop: \`${shopName}\`\n`;
+                msg += `• Shop: ${shopLink}\n`;
                 msg += `• File: ${fileStatus}`;
                 if (noteText) {
                   msg += `\n• Note: ${noteText}`;
