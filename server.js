@@ -48,8 +48,24 @@ app.post('/api/telegram-webhook', async (req, res) => {
       await sendTelegramMessage(chatId, 
         `🆔 *Thông tin của bạn:*\n\n` +
         `• User ID: \`${userId}\`\n` +
-        `• Username: ${username ? '@' + username : 'Không có'}\n` +
-        `• Tên: ${firstName}`,
+        `• Chat ID: \`${chatId}\`\n` +
+        `• Username: @${username}`,
+        { parse_mode: 'Markdown' }
+      );
+      return res.json({ ok: true });
+    }
+    
+    // Handle /groupid command - show group chat ID
+    if (text === '/groupid') {
+      const chatType = message.chat.type; // 'private', 'group', 'supergroup'
+      const chatTitle = message.chat.title || 'N/A';
+      
+      await sendTelegramMessage(chatId, 
+        `🆔 *Thông tin chat:*\n\n` +
+        `• Chat ID: \`${chatId}\`\n` +
+        `• Type: ${chatType}\n` +
+        `• Title: ${chatTitle}\n\n` +
+        `${chatType !== 'private' ? '✅ Đây là Group ID, copy vào .env!' : '⚠️ Đây là chat riêng, không phải group'}`,
         { parse_mode: 'Markdown' }
       );
       return res.json({ ok: true });
@@ -351,10 +367,13 @@ async function uploadTelegramPhotoToR2(fileId) {
   }
 }
 
-// Notify host about feedback count via Telegram
+// Notify host about feedback count via Telegram Group
 async function notifyHostFeedbackCount(host) {
-  const telegramId = HOST_TO_TELEGRAM_ID[host];
-  if (!telegramId) return; // Host not mapped to Telegram
+  const groupChatId = process.env.TELEGRAM_GROUP_CHAT_ID;
+  if (!groupChatId) {
+    console.warn('TELEGRAM_GROUP_CHAT_ID not configured');
+    return;
+  }
   
   try {
     // Get current feedback count for this host
@@ -363,10 +382,10 @@ async function notifyHostFeedbackCount(host) {
     const feedbackCount = rows.filter(r => r.host === host && r.stage === 'Feedback').length;
     
     if (feedbackCount > 0) {
-      await sendTelegramMessage(telegramId, `📬 ${host} có ${feedbackCount} feedback`);
+      await sendTelegramMessage(groupChatId, `📬 ${host} có ${feedbackCount} feedback`);
     }
   } catch (error) {
-    console.error('Failed to notify host:', error);
+    console.error('Failed to notify group:', error);
   }
 }
 
