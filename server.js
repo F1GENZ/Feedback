@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const sheetsClient = require('./sheetsClient');
 const crypto = require('crypto');
+const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 require('dotenv').config();
 
 const app = express();
@@ -49,12 +50,12 @@ app.post('/api/telegram-webhook', async (req, res) => {
       return res.json({ ok: true });
     }
     
-    // Handle // command - show user's feedbacks
-    if (text === '//') {
-      // Find host based on Telegram user ID
-      const host = TELEGRAM_ID_TO_HOST[userId] || null;
+    // Handle // command - show user's feedbacks or // <Host> for specific host
+    if (text === '//' || text.startsWith('// ')) {
+      // Find current user's host
+      const currentUserHost = TELEGRAM_ID_TO_HOST[userId] || null;
       
-      if (!host) {
+      if (!currentUserHost) {
         await sendTelegramMessage(chatId, 
           `⚠️ Chưa được đăng ký trong hệ thống\n\n` +
           `🆔 User ID của bạn: \`${userId}\`\n\n` +
@@ -64,17 +65,38 @@ app.post('/api/telegram-webhook', async (req, res) => {
         return res.json({ ok: true });
       }
       
-      // Get feedbacks for this host
+      // Determine which host to query
+      let targetHost = currentUserHost;
+      if (text.startsWith('// ')) {
+        const requestedHost = text.substring(3).trim();
+        // Map common variations
+        const hostMap = {
+          'quoc': 'Quốc',
+          'quốc': 'Quốc',
+          'taiz': 'Taiz',
+          'tai': 'Taiz',
+          'tài': 'Taiz',
+          'lam': 'Lâm',
+          'lâm': 'Lâm',
+          'nghia': 'Nghĩa',
+          'nghĩa': 'Nghĩa',
+          'tuan': 'Tuan',
+          'tuấn': 'Tuan'
+        };
+        targetHost = hostMap[requestedHost.toLowerCase()] || requestedHost;
+      }
+      
+      // Get feedbacks for target host
       const data = await sheetsClient.getAllData();
       const rows = data.rows || [];
       
       // Filter feedbacks: stage = "Feedback" only
       const userFeedbacks = rows.filter(r => 
-        r.host === host && r.stage === 'Feedback'
+        r.host === targetHost && r.stage === 'Feedback'
       );
       
       if (userFeedbacks.length === 0) {
-        await sendTelegramMessage(chatId, `✅ Không có feedback nào cho ${host}`);
+        await sendTelegramMessage(chatId, `✅ Không có feedback nào cho ${targetHost}`);
         return res.json({ ok: true });
       }
       
@@ -140,7 +162,7 @@ app.post('/api/telegram-webhook', async (req, res) => {
             if (message.photo && message.photo.length > 0) {
               // Get largest photo
               const photo = message.photo[message.photo.length - 1];
-              const photoUrl = await getTelegramFileUrl(photo.file_id);
+              const photoUrl = await uploadTelegramPhotoToR2(photo.file_id);
               commentText = `[Telegram] ${firstName}: ${extraText || 'Done'}\n${photoUrl}`;
             } else if (extraText) {
               commentText = `[Telegram] ${firstName}: ${extraText}`;
@@ -188,12 +210,11 @@ app.post('/api/telegram-webhook', async (req, res) => {
             
             if (message.photo && message.photo.length > 0) {
               const photo = message.photo[message.photo.length - 1];
-              const photoUrl = await getTelegramFileUrl(photo.file_id);
+              const photoUrl = await uploadTelegramPhotoToR2(photo.file_id);
               commentText += `\n${photoUrl}`;
             }
             
             await addCommentToFeedback(rowNumber, commentText);
-            await sendTelegramMessage(chatId, `💬 Đã thêm comment vào #${rowNumber}`);
           }
         } catch (error) {
           await sendTelegramMessage(chatId, `❌ Lỗi: ${error.message}`);
@@ -254,23 +275,59 @@ async function sendTelegramMessage(chatId, text, options = {}) {
   }
 }
 
-// Get Telegram file URL from file_id
-async function getTelegramFileUrl(fileId) {
+// Upload Telegram photo to R2 and return CDN URL
+async function uploadTelegramPhotoToR2(fileId) {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   if (!botToken) {
     return 'Error: Bot token not configured';
   }
   
   try {
-    const response = await fetch(`https://api.telegram.org/bot${botToken}/getFile?file_id=${fileId}`);
-    const data = await response.json();
+    // Step 1: Get file path from Telegram
+    const fileResponse = await fetch(`https://api.telegram.org/bot${botToken}/getFile?file_id=${fileId}`);
+    const fileData = await fileResponse.json();
     
-    if (data.ok && data.result && data.result.file_path) {
-      return `https://api.telegram.org/file/bot${botToken}/${data.result.file_path}`;
+    if (!fileData.ok || !fileData.result || !fileData.result.file_path) {
+      return 'Error: Could not get file from Telegram';
     }
-    return 'Error: Could not get file URL';
+    
+    const filePath = fileData.result.file_path;
+    const fileUrl = `https://api.telegram.org/file/bot${botToken}/${filePath}`;
+    
+    // Step 2: Download file from Telegram
+    const downloadResponse = await fetch(fileUrl);
+    if (!downloadResponse.ok) {
+      return 'Error: Could not download file';
+    }
+    
+    const arrayBuffer = await downloadResponse.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    
+    // Step 3: Upload to R2
+    const s3Client = new S3Client({
+      region: 'auto',
+      endpoint: `https://${process.env.CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+      credentials: {
+        accessKeyId: process.env.CLOUDFLARE_R2_ACCESS_KEY_ID,
+        secretAccessKey: process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY
+      }
+    });
+    
+    // Generate unique filename
+    const ext = filePath.split('.').pop() || 'jpg';
+    const filename = `telegram/${Date.now()}-${crypto.randomUUID()}.${ext}`;
+    
+    await s3Client.send(new PutObjectCommand({
+      Bucket: process.env.CLOUDFLARE_R2_BUCKET_NAME,
+      Key: filename,
+      Body: buffer,
+      ContentType: `image/${ext}`
+    }));
+    
+    // Return CDN URL
+    return `${process.env.CLOUDFLARE_CDN_URL}/${filename}`;
   } catch (error) {
-    console.error('Failed to get Telegram file URL:', error);
+    console.error('Failed to upload to R2:', error);
     return 'Error: ' + error.message;
   }
 }
