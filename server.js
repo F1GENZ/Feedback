@@ -10,14 +10,14 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// Telegram username to Host mapping
-const TELEGRAM_TO_HOST = {
-  'masterquoc': 'Quốc',
-  'Master Quốc': 'Quốc',
-  'duylam1015': 'Lâm',
-  'taizpro': 'Taiz',
-  'tuandev': 'Tuan',
-  'nghiadev': 'Nghĩa'
+// Telegram User ID to Host mapping (ID is more reliable than username)
+// To get your ID: send /myid to the bot
+const TELEGRAM_ID_TO_HOST = {
+  '814408956': 'Quốc',
+  '852487488': 'Taiz',
+  '642649821': 'Lâm',
+  '801593125': 'Nghĩa',  // Note: Tuan và Nghĩa có cùng ID
+  // '801593125': 'Tuan', // Tuan có cùng ID với Nghĩa - cần xác nhận lại
 };
 
 // ==================== TELEGRAM BOT WEBHOOK ====================
@@ -32,17 +32,35 @@ app.post('/api/telegram-webhook', async (req, res) => {
     
     const message = update.message;
     const chatId = message.chat.id;
+    const userId = message.from.id.toString();
     const text = (message.text || '').trim();
-    const username = message.from.username || message.from.first_name || 'Unknown';
-    const firstName = message.from.first_name || username;
+    const username = message.from.username || '';
+    const firstName = message.from.first_name || 'User';
+    
+    // Handle /myid command - show user's Telegram ID
+    if (text === '/myid') {
+      await sendTelegramMessage(chatId, 
+        `🆔 *Thông tin của bạn:*\n\n` +
+        `• User ID: \`${userId}\`\n` +
+        `• Username: ${username ? '@' + username : 'Không có'}\n` +
+        `• Tên: ${firstName}`,
+        { parse_mode: 'Markdown' }
+      );
+      return res.json({ ok: true });
+    }
     
     // Handle // command - show user's feedbacks
     if (text === '//') {
-      // Find host based on Telegram username
-      const host = TELEGRAM_TO_HOST[username] || TELEGRAM_TO_HOST[firstName] || null;
+      // Find host based on Telegram user ID
+      const host = TELEGRAM_ID_TO_HOST[userId] || null;
       
       if (!host) {
-        await sendTelegramMessage(chatId, `⚠️ Không tìm thấy host mapping cho user: ${username}\n\nLiên hệ admin để được thêm vào hệ thống.`);
+        await sendTelegramMessage(chatId, 
+          `⚠️ Chưa được đăng ký trong hệ thống\n\n` +
+          `🆔 User ID của bạn: \`${userId}\`\n\n` +
+          `Gửi ID này cho admin để được thêm vào.`,
+          { parse_mode: 'Markdown' }
+        );
         return res.json({ ok: true });
       }
       
