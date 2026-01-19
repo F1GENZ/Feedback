@@ -527,9 +527,11 @@ async function uploadTelegramPhotoToR2(fileId) {
 async function notifyHostFeedbackCount(host) {
   const groupChatId = process.env.TELEGRAM_GROUP_CHAT_ID;
   if (!groupChatId) {
-    console.warn('TELEGRAM_GROUP_CHAT_ID not configured');
+    console.warn('[Notification] TELEGRAM_GROUP_CHAT_ID not configured');
     return;
   }
+  
+  console.log(`[Notification] Checking feedback count for host: ${host}`);
   
   try {
     // Get current feedback count for this host
@@ -537,11 +539,18 @@ async function notifyHostFeedbackCount(host) {
     const rows = data.rows || [];
     const feedbackCount = rows.filter(r => r.host === host && r.stage === 'Feedback').length;
     
+    console.log(`[Notification] ${host} has ${feedbackCount} feedback(s)`);
+    
     if (feedbackCount > 0) {
-      await sendTelegramMessage(groupChatId, `📬 ${host} có ${feedbackCount} feedback`);
+      const message = `📬 ${host} có ${feedbackCount} feedback`;
+      console.log(`[Notification] Sending to group ${groupChatId}: ${message}`);
+      await sendTelegramMessage(groupChatId, message);
+      console.log(`[Notification] Message sent successfully`);
+    } else {
+      console.log(`[Notification] No feedback to notify`);
     }
   } catch (error) {
-    console.error('Failed to notify group:', error);
+    console.error('[Notification] Failed to notify group:', error);
   }
 }
 
@@ -1050,7 +1059,11 @@ async function updateStage(rowNumber, newStage) {
   // Notify host if stage changed to Feedback
   if (newStage === 'Feedback' && host) {
     console.log(`[Notification] Stage changed to Feedback for host: ${host}`);
-    await notifyHostFeedbackCount(host);
+    try {
+      await notifyHostFeedbackCount(host);
+    } catch (notifyError) {
+      console.error('[Notification] Error calling notifyHostFeedbackCount:', notifyError);
+    }
   }
   
   // await sheetsClient.logHistory('UPDATE_STAGE', `Row ${rowNumber} -> ${newStage}`); // DISABLED
