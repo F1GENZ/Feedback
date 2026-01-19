@@ -124,7 +124,13 @@ app.post('/api/telegram-webhook', async (req, res) => {
       // Send each feedback as a separate message with rowNumber for reply tracking
       for (const fb of userFeedbacks) {
         const shop = fb.shop || 'N/A';
-        const note = fb.note || fb.message || '';
+        let note = fb.note || fb.message || '';
+        
+        // Truncate note if too long (Telegram limit 4096 chars)
+        const MAX_NOTE_LENGTH = 500;
+        if (note.length > MAX_NOTE_LENGTH) {
+          note = note.substring(0, MAX_NOTE_LENGTH) + '... (quá dài, xem trên Dashboard)';
+        }
         
         // Check if has link - make File Feedback clickable
         const fileStatus = fb.link ? `[File Feedback](${fb.link})` : 'KHÔNG có file';
@@ -214,7 +220,14 @@ app.post('/api/telegram-webhook', async (req, res) => {
               
               for (const fb of remainingFeedbacks) {
                 const shopName = fb.shop || 'N/A';
-                const noteText = fb.note || fb.message || '';
+                let noteText = fb.note || fb.message || '';
+                
+                // Truncate note if too long
+                const MAX_NOTE_LENGTH = 500;
+                if (noteText.length > MAX_NOTE_LENGTH) {
+                  noteText = noteText.substring(0, MAX_NOTE_LENGTH) + '... (quá dài, xem trên Dashboard)';
+                }
+                
                 const fileStatus = fb.link ? `[File Feedback](${fb.link})` : 'KHÔNG có file';
                 
                 // Make shop name clickable
