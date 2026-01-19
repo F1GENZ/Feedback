@@ -232,8 +232,8 @@ app.post('/api/telegram-webhook', async (req, res) => {
             if (remainingFeedbacks.length > 0) {
               await sendTelegramMessage(chatId, `📋 Còn ${remainingFeedbacks.length} feedback:`);
               
-              // Prepare all messages
-              const refreshMessages = remainingFeedbacks.map(fb => {
+              // Send each feedback (with photo if available)
+              for (const fb of remainingFeedbacks) {
                 const shopName = fb.shop || 'N/A';
                 let noteText = fb.note || fb.message || '';
                 
@@ -243,22 +243,28 @@ app.post('/api/telegram-webhook', async (req, res) => {
                   noteText = noteText.substring(0, MAX_NOTE_LENGTH) + '... (quá dài, xem trên Dashboard)';
                 }
                 
-                // Build message
-                let msg = `• ID: #${fb.rowNumber}\n`;
-                msg += `• Shop: ${shopName}\n`;
-                msg += `• File: ${fb.link || 'KHÔNG có file'}`;
+                // Build caption/message
+                let caption = `• ID: #${fb.rowNumber}\n`;
+                caption += `• Shop: ${shopName}\n`;
+                caption += `• File: ${fb.link || 'KHÔNG có file'}`;
                 if (noteText) {
-                  msg += `\n• Note: ${noteText}`;
+                  caption += `\n• Note: ${noteText}`;
                 }
                 
-                return msg;
-              });
-              
-              // Send all in parallel (fastest)
-              await Promise.all(refreshMessages.map(msg => 
-                sendTelegramMessage(chatId, msg, { disable_web_page_preview: true })
-                  .catch(err => console.error('Send error:', err.message))
-              ));
+                try {
+                  if (fb.imageId) {
+                    await sendTelegramPhoto(chatId, fb.imageId, caption);
+                  } else {
+                    await sendTelegramMessage(chatId, caption, { disable_web_page_preview: true });
+                  }
+                } catch (err) {
+                  console.error('Send error:', err.message);
+                  if (fb.imageId) {
+                    await sendTelegramMessage(chatId, caption + '\n\n📷 (Không thể tải ảnh)', { disable_web_page_preview: true })
+                      .catch(e => console.error('Fallback error:', e.message));
+                  }
+                }
+              }
             } else {
               await sendTelegramMessage(chatId, `🎉 Không còn feedback nào!`);
             }
@@ -342,6 +348,31 @@ async function sendTelegramMessage(chatId, text, options = {}) {
     });
   } catch (error) {
     console.error('Failed to send Telegram message:', error);
+  }
+}
+
+// Send photo to Telegram
+async function sendTelegramPhoto(chatId, fileId, caption = '', options = {}) {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  if (!botToken) {
+    console.error('TELEGRAM_BOT_TOKEN not configured');
+    return;
+  }
+  
+  try {
+    await fetch(`https://api.telegram.org/bot${botToken}/sendPhoto`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        photo: fileId,
+        caption: caption,
+        ...options
+      })
+    });
+  } catch (error) {
+    console.error('Failed to send Telegram photo:', error);
+    throw error; // Re-throw to trigger fallback
   }
 }
 
