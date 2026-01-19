@@ -86,28 +86,42 @@ app.post('/api/telegram-webhook', async (req, res) => {
         // Check if has link - make File Feedback clickable
         const fileStatus = fb.link ? `[File Feedback](${fb.link})` : 'KHÔNG có file';
         
-        // Simple format with bullet points
+        // Simple format with bullet points (no visible ID)
         let msg = `• Shop: \`${shop}\`\n`;
         msg += `• File: ${fileStatus}\n`;
         if (note) {
-          msg += `• Note: ${note}\n`;
+          msg += `• Note: ${note}`;
         }
-        msg += `\n_#${fb.rowNumber}_`; // ID at end in italic (smaller)
         
-        await sendTelegramMessage(chatId, msg, { parse_mode: 'Markdown', disable_web_page_preview: true });
+        // Store rowNumber in invisible inline button
+        await sendTelegramMessage(chatId, msg, { 
+          parse_mode: 'Markdown', 
+          disable_web_page_preview: true,
+          reply_markup: {
+            inline_keyboard: [[
+              { text: `#${fb.rowNumber}`, callback_data: `fb_${fb.rowNumber}` }
+            ]]
+          }
+        });
       }
       
       return res.json({ ok: true });
     }
     
-    // Handle reply to feedback messages (with #rowNumber)
+    // Handle reply to feedback messages (with inline button containing rowNumber)
     if (message.reply_to_message) {
-      const originalText = message.reply_to_message.text || '';
+      let rowNumber = null;
       
-      // Extract rowNumber from #123 pattern
-      const match = originalText.match(/#(\d+)\s/);
-      if (match) {
-        const rowNumber = parseInt(match[1]);
+      // Try to extract rowNumber from inline button
+      const replyMarkup = message.reply_to_message.reply_markup;
+      if (replyMarkup && replyMarkup.inline_keyboard && replyMarkup.inline_keyboard[0] && replyMarkup.inline_keyboard[0][0]) {
+        const callbackData = replyMarkup.inline_keyboard[0][0].callback_data;
+        if (callbackData && callbackData.startsWith('fb_')) {
+          rowNumber = parseInt(callbackData.replace('fb_', ''));
+        }
+      }
+      
+      if (rowNumber) {
         const lowerText = text.toLowerCase();
         
         try {
