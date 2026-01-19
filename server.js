@@ -87,13 +87,13 @@ app.post('/api/telegram-webhook', async (req, res) => {
         // Check if has link - make File Feedback clickable
         const fileStatus = fb.link ? `[File Feedback](${fb.link})` : 'KHÔNG có file';
         
-        // Include [#rowNumber] for reply tracking
-        let msg = `[#${fb.rowNumber}] ${shop} \'=> ${host}${tags}\n${fileStatus}`;
+        // Include #rowNumber for reply tracking (avoid [] which conflicts with Markdown)
+        let msg = `#${fb.rowNumber} ${shop} \'=> ${host}${tags}\n${fileStatus}`;
         if (note) {
           msg += `\n${note}`;
         }
         
-        await sendTelegramMessage(chatId, msg, { parse_mode: 'Markdown' });
+        await sendTelegramMessage(chatId, msg, { parse_mode: 'Markdown', disable_web_page_preview: true });
       }
       
       return res.json({ ok: true });
@@ -103,8 +103,8 @@ app.post('/api/telegram-webhook', async (req, res) => {
     if (message.reply_to_message && text.toLowerCase() === 'done') {
       const originalText = message.reply_to_message.text || '';
       
-      // Extract rowNumber from [#123] pattern
-      const match = originalText.match(/\[#(\d+)\]/);
+      // Extract rowNumber from #123 pattern
+      const match = originalText.match(/#(\d+)\s/);
       if (match) {
         const rowNumber = parseInt(match[1]);
         
