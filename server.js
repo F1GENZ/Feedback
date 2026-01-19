@@ -26,6 +26,9 @@ const HOST_TO_TELEGRAM_ID = Object.fromEntries(
   Object.entries(TELEGRAM_ID_TO_HOST).map(([id, host]) => [host, id])
 );
 
+// Cache for R2 URLs (to avoid re-uploading same images)
+const imageUrlCache = new Map();
+
 // ==================== TELEGRAM BOT WEBHOOK ====================
 app.post('/api/telegram-webhook', async (req, res) => {
   try {
@@ -152,7 +155,7 @@ app.post('/api/telegram-webhook', async (req, res) => {
         try {
           // If has imageId, send as photo with caption
           if (fb.imageId) {
-            await sendTelegramPhoto(chatId, fb.imageId, caption);
+            await sendTelegramPhoto(chatId, fb.imageId, caption, { disable_web_page_preview: true }, fb.rowNumber);
           } else {
             // Otherwise send as text
             await sendTelegramMessage(chatId, caption, { disable_web_page_preview: true });
@@ -258,7 +261,7 @@ app.post('/api/telegram-webhook', async (req, res) => {
                 
                 try {
                   if (fb.imageId) {
-                    await sendTelegramPhoto(chatId, fb.imageId, caption);
+                    await sendTelegramPhoto(chatId, fb.imageId, caption, { disable_web_page_preview: true }, fb.rowNumber);
                   } else {
                     await sendTelegramMessage(chatId, caption, { disable_web_page_preview: true });
                   }
@@ -359,7 +362,7 @@ async function sendTelegramMessage(chatId, text, options = {}) {
 }
 
 // Send photo to Telegram
-async function sendTelegramPhoto(chatId, fileId, caption = '', options = {}) {
+async function sendTelegramPhoto(chatId, fileId, caption = '', options = {}, rowNumber = null) {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   const oldBotToken = process.env.TELEGRAM_IMAGE_BOT_TOKEN;
   
@@ -369,11 +372,21 @@ async function sendTelegramPhoto(chatId, fileId, caption = '', options = {}) {
   }
   
   try {
-    // Strategy: Get image from old bot, upload to R2, send R2 URL via new bot
     let photoToSend = fileId;
+    let needsSheetUpdate = false;
     
-    // Try to get file from old bot first (since images were uploaded with old bot)
-    if (oldBotToken) {
+    // If imageId is already a URL, use it directly
+    if (fileId.startsWith('http://') || fileId.startsWith('https://')) {
+      photoToSend = fileId;
+      console.log('Using existing URL:', fileId);
+    }
+    // Check cache first
+    else if (imageUrlCache.has(fileId)) {
+      photoToSend = imageUrlCache.get(fileId);
+      console.log('Using cached R2 URL:', photoToSend);
+    }
+    // Otherwise, download from old bot and upload to R2
+    else if (oldBotToken) {
       try {
         const fileResponse = await fetch(`https://api.telegram.org/bot${oldBotToken}/getFile?file_id=${fileId}`);
         const fileData = await fileResponse.json();
@@ -409,7 +422,11 @@ async function sendTelegramPhoto(chatId, fileId, caption = '', options = {}) {
             
             // Use R2 CDN URL
             photoToSend = `${process.env.CLOUDFLARE_CDN_URL}/${fileName}`;
-            console.log('Uploaded to R2:', photoToSend);
+            
+            // Cache it
+            imageUrlCache.set(fileId, photoToSend);
+            needsSheetUpdate = true;
+            console.log('Uploaded to R2 and cached:', photoToSend);
           }
         }
       } catch (err) {
@@ -432,6 +449,16 @@ async function sendTelegramPhoto(chatId, fileId, caption = '', options = {}) {
     const result = await response.json();
     if (!result.ok) {
       throw new Error(result.description || 'Failed to send photo');
+    }
+    
+    // Update Sheet with R2 URL if we uploaded a new image
+    if (needsSheetUpdate && rowNumber && photoToSend.startsWith('http')) {
+      try {
+        await sheetsClient.updateCell(rowNumber, 'N', photoToSend);
+        console.log(`Updated Sheet row ${rowNumber} with R2 URL`);
+      } catch (err) {
+        console.error('Failed to update Sheet:', err.message);
+      }
     }
   } catch (error) {
     console.error('Failed to send Telegram photo:', error);
