@@ -86,42 +86,31 @@ app.post('/api/telegram-webhook', async (req, res) => {
         // Check if has link - make File Feedback clickable
         const fileStatus = fb.link ? `[File Feedback](${fb.link})` : 'KHÔNG có file';
         
-        // Simple format with bullet points (no visible ID)
-        let msg = `• Shop: \`${shop}\`\n`;
-        msg += `• File: ${fileStatus}\n`;
+        // Simple format with ID at top
+        let msg = `• ID: #${fb.rowNumber}\n`;
+        msg += `• Shop: \`${shop}\`\n`;
+        msg += `• File: ${fileStatus}`;
         if (note) {
-          msg += `• Note: ${note}`;
+          msg += `\n• Note: ${note}`;
         }
         
-        // Store rowNumber in invisible inline button
         await sendTelegramMessage(chatId, msg, { 
           parse_mode: 'Markdown', 
-          disable_web_page_preview: true,
-          reply_markup: {
-            inline_keyboard: [[
-              { text: `#${fb.rowNumber}`, callback_data: `fb_${fb.rowNumber}` }
-            ]]
-          }
+          disable_web_page_preview: true
         });
       }
       
       return res.json({ ok: true });
     }
     
-    // Handle reply to feedback messages (with inline button containing rowNumber)
+    // Handle reply to feedback messages (with hidden #rowNumber in spoiler)
     if (message.reply_to_message) {
-      let rowNumber = null;
+      const originalText = message.reply_to_message.text || '';
       
-      // Try to extract rowNumber from inline button
-      const replyMarkup = message.reply_to_message.reply_markup;
-      if (replyMarkup && replyMarkup.inline_keyboard && replyMarkup.inline_keyboard[0] && replyMarkup.inline_keyboard[0][0]) {
-        const callbackData = replyMarkup.inline_keyboard[0][0].callback_data;
-        if (callbackData && callbackData.startsWith('fb_')) {
-          rowNumber = parseInt(callbackData.replace('fb_', ''));
-        }
-      }
-      
-      if (rowNumber) {
+      // Extract rowNumber from spoiler ||#123|| or visible #123
+      const match = originalText.match(/#(\d+)/);
+      if (match) {
+        const rowNumber = parseInt(match[1]);
         const lowerText = text.toLowerCase();
         
         try {
@@ -145,9 +134,39 @@ app.post('/api/telegram-webhook', async (req, res) => {
             const extraText = text.replace(/^done[\s\-:]*/i, '').trim();
             if (extraText) {
               await addCommentToFeedback(rowNumber, `[Telegram] ${firstName}: ${extraText}`);
-              await sendTelegramMessage(chatId, `✅ #${rowNumber} → Done + thêm comment!`);
+            }
+            
+            await sendTelegramMessage(chatId, `✅ #${rowNumber} → Done!`);
+            
+            // Auto-refresh: send remaining feedbacks
+            const data = await sheetsClient.getAllData();
+            const rows = data.rows || [];
+            const remainingFeedbacks = rows.filter(r => 
+              r.host === TELEGRAM_ID_TO_HOST[userId] && r.stage === 'Feedback'
+            );
+            
+            if (remainingFeedbacks.length > 0) {
+              await sendTelegramMessage(chatId, `📋 Còn ${remainingFeedbacks.length} feedback:`);
+              
+              for (const fb of remainingFeedbacks) {
+                const shopName = fb.shop || 'N/A';
+                const noteText = fb.note || fb.message || '';
+                const fileStatus = fb.link ? `[File Feedback](${fb.link})` : 'KHÔNG có file';
+                
+                let msg = `• ID: #${fb.rowNumber}\n`;
+                msg += `• Shop: \`${shopName}\`\n`;
+                msg += `• File: ${fileStatus}`;
+                if (noteText) {
+                  msg += `\n• Note: ${noteText}`;
+                }
+                
+                await sendTelegramMessage(chatId, msg, { 
+                  parse_mode: 'Markdown', 
+                  disable_web_page_preview: true
+                });
+              }
             } else {
-              await sendTelegramMessage(chatId, `✅ #${rowNumber} → Done!`);
+              await sendTelegramMessage(chatId, `🎉 Không còn feedback nào!`);
             }
           } else {
             // Any other reply → add as comment
