@@ -138,18 +138,29 @@ app.post('/api/telegram-webhook', async (req, res) => {
         // Make shop name clickable (assuming shop is a URL)
         const shopLink = shop.startsWith('http') ? `[${shop}](https://${shop})` : `[${shop}](https://${shop})`;
         
+        // Escape markdown special characters in note
+        const escapeMarkdown = (text) => {
+          return text.replace(/([_*\[\]()~`>#+\-=|{}.!])/g, '\\$1');
+        };
+        
         // Simple format with ID at top
         let msg = `• ID: #${fb.rowNumber}\n`;
         msg += `• Shop: ${shopLink}\n`;
         msg += `• File: ${fileStatus}`;
         if (note) {
-          msg += `\n• Note: ${note}`;
+          msg += `\n• Note: ${escapeMarkdown(note)}`;
         }
         
-        await sendTelegramMessage(chatId, msg, { 
-          parse_mode: 'Markdown', 
-          disable_web_page_preview: true
-        });
+        try {
+          await sendTelegramMessage(chatId, msg, { 
+            parse_mode: 'Markdown', 
+            disable_web_page_preview: true
+          });
+        } catch (error) {
+          console.error(`Failed to send feedback #${fb.rowNumber}:`, error.message);
+          // Try without markdown if failed
+          await sendTelegramMessage(chatId, `• ID: #${fb.rowNumber}\n• Shop: ${shop}\n• File: ${fb.link || 'KHÔNG có file'}\n• Note: ${note}`);
+        }
       }
       
       return res.json({ ok: true });
@@ -233,17 +244,27 @@ app.post('/api/telegram-webhook', async (req, res) => {
                 // Make shop name clickable
                 const shopLink = shopName.startsWith('http') ? `[${shopName}](https://${shopName})` : `[${shopName}](https://${shopName})`;
                 
+                // Escape markdown special characters
+                const escapeMarkdown = (text) => {
+                  return text.replace(/([_*\[\]()~`>#+\-=|{}.!])/g, '\\$1');
+                };
+                
                 let msg = `• ID: #${fb.rowNumber}\n`;
                 msg += `• Shop: ${shopLink}\n`;
                 msg += `• File: ${fileStatus}`;
                 if (noteText) {
-                  msg += `\n• Note: ${noteText}`;
+                  msg += `\n• Note: ${escapeMarkdown(noteText)}`;
                 }
                 
-                await sendTelegramMessage(chatId, msg, { 
-                  parse_mode: 'Markdown', 
-                  disable_web_page_preview: true
-                });
+                try {
+                  await sendTelegramMessage(chatId, msg, { 
+                    parse_mode: 'Markdown', 
+                    disable_web_page_preview: true
+                  });
+                } catch (error) {
+                  console.error(`Failed to send feedback #${fb.rowNumber}:`, error.message);
+                  await sendTelegramMessage(chatId, `• ID: #${fb.rowNumber}\n• Shop: ${shopName}\n• File: ${fb.link || 'KHÔNG có file'}\n• Note: ${noteText}`);
+                }
               }
             } else {
               await sendTelegramMessage(chatId, `🎉 Không còn feedback nào!`);
