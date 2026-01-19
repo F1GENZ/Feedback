@@ -21,6 +21,11 @@ const TELEGRAM_ID_TO_HOST = {
   // '801593125': 'Tuan', // Tuan có cùng ID với Nghĩa - cần xác nhận lại
 };
 
+// Reverse mapping for notifications
+const HOST_TO_TELEGRAM_ID = Object.fromEntries(
+  Object.entries(TELEGRAM_ID_TO_HOST).map(([id, host]) => [host, id])
+);
+
 // ==================== TELEGRAM BOT WEBHOOK ====================
 app.post('/api/telegram-webhook', async (req, res) => {
   try {
@@ -162,8 +167,12 @@ app.post('/api/telegram-webhook', async (req, res) => {
             const extraText = replyText.replace(/^done[\s\-:]*/i, '').trim();
             let commentText = '';
             
-            if (message.photo && message.photo.length > 0) {
-              // Get largest photo
+            // Check for document (uncompressed image) first, then photo
+            if (message.document && message.document.mime_type && message.document.mime_type.startsWith('image/')) {
+              const photoUrl = await uploadTelegramPhotoToR2(message.document.file_id);
+              commentText = `[Telegram] ${firstName}: ${extraText || 'Done'}\n${photoUrl}`;
+            } else if (message.photo && message.photo.length > 0) {
+              // Get largest photo (compressed)
               const photo = message.photo[message.photo.length - 1];
               const photoUrl = await uploadTelegramPhotoToR2(photo.file_id);
               commentText = `[Telegram] ${firstName}: ${extraText || 'Done'}\n${photoUrl}`;
@@ -214,7 +223,11 @@ app.post('/api/telegram-webhook', async (req, res) => {
             // Any other reply → add as comment
             let commentText = `[Telegram] ${firstName}: ${replyText}`;
             
-            if (message.photo && message.photo.length > 0) {
+            // Check for document (uncompressed) first, then photo
+            if (message.document && message.document.mime_type && message.document.mime_type.startsWith('image/')) {
+              const photoUrl = await uploadTelegramPhotoToR2(message.document.file_id);
+              commentText += `\n${photoUrl}`;
+            } else if (message.photo && message.photo.length > 0) {
               const photo = message.photo[message.photo.length - 1];
               const photoUrl = await uploadTelegramPhotoToR2(photo.file_id);
               commentText += `\n${photoUrl}`;
@@ -337,6 +350,26 @@ async function uploadTelegramPhotoToR2(fileId) {
     return 'Error: ' + error.message;
   }
 }
+
+// Notify host about feedback count via Telegram
+async function notifyHostFeedbackCount(host) {
+  const telegramId = HOST_TO_TELEGRAM_ID[host];
+  if (!telegramId) return; // Host not mapped to Telegram
+  
+  try {
+    // Get current feedback count for this host
+    const data = await sheetsClient.getAllData();
+    const rows = data.rows || [];
+    const feedbackCount = rows.filter(r => r.host === host && r.stage === 'Feedback').length;
+    
+    if (feedbackCount > 0) {
+      await sendTelegramMessage(telegramId, `📬 ${host} có ${feedbackCount} feedback`);
+    }
+  } catch (error) {
+    console.error('Failed to notify host:', error);
+  }
+}
+
 
 // Add comment to feedback (for Telegram integration)
 async function addCommentToFeedback(rowNumber, commentText) {
@@ -757,6 +790,10 @@ async function updateFeedback(rowNumber, updates) {
 }
 
 async function updateStage(rowNumber, newStage) {
+  // Get current row to check host
+  const currentRow = await sheetsClient.getRow(rowNumber);
+  const host = currentRow[2]; // Column C = Host
+  
   // Update Column F (Stage) and Column O (UpdatedAt)
   const now = new Date();
   const vnTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' }));
@@ -770,6 +807,12 @@ async function updateStage(rowNumber, newStage) {
   
   await sheetsClient.updateCell(rowNumber, 'F', newStage);
   await sheetsClient.updateCell(rowNumber, 'O', timestamp);
+  
+  // Notify host if stage changed to Feedback
+  if (newStage === 'Feedback' && host) {
+    await notifyHostFeedbackCount(host);
+  }
+  
   // await sheetsClient.logHistory('UPDATE_STAGE', `Row ${rowNumber} -> ${newStage}`); // DISABLED
   return { success: true, message: `Đã cập nhật Stage thành "${newStage}"` };
 }
