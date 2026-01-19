@@ -128,8 +128,9 @@ app.post('/api/telegram-webhook', async (req, res) => {
         body: JSON.stringify({ chat_id: chatId, action: 'typing' })
       });
       
-      // Prepare all messages
-      const messages = userFeedbacks.map(fb => {
+      
+      // Prepare and send all messages
+      for (const fb of userFeedbacks) {
         const shop = fb.shop || 'N/A';
         let note = fb.note || fb.message || '';
         
@@ -139,22 +140,31 @@ app.post('/api/telegram-webhook', async (req, res) => {
           note = note.substring(0, MAX_NOTE_LENGTH) + '... (quá dài, xem trên Dashboard)';
         }
         
-        // Build message
-        let msg = `• ID: #${fb.rowNumber}\n`;
-        msg += `• Shop: ${shop}\n`;
-        msg += `• File: ${fb.link || 'KHÔNG có file'}`;
+        // Build caption/message
+        let caption = `• ID: #${fb.rowNumber}\n`;
+        caption += `• Shop: ${shop}\n`;
+        caption += `• File: ${fb.link || 'KHÔNG có file'}`;
         if (note) {
-          msg += `\n• Note: ${note}`;
+          caption += `\n• Note: ${note}`;
         }
         
-        return msg;
-      });
-      
-      // Send all messages in parallel (fastest)
-      await Promise.all(messages.map(msg => 
-        sendTelegramMessage(chatId, msg, { disable_web_page_preview: true })
-          .catch(err => console.error('Send error:', err.message))
-      ));
+        try {
+          // If has imageId, send as photo with caption
+          if (fb.imageId) {
+            await sendTelegramPhoto(chatId, fb.imageId, caption);
+          } else {
+            // Otherwise send as text
+            await sendTelegramMessage(chatId, caption, { disable_web_page_preview: true });
+          }
+        } catch (err) {
+          console.error('Send error:', err.message);
+          // Fallback to text if photo fails
+          if (fb.imageId) {
+            await sendTelegramMessage(chatId, caption + '\n\n📷 (Không thể tải ảnh)', { disable_web_page_preview: true })
+              .catch(e => console.error('Fallback error:', e.message));
+          }
+        }
+      }
       
       return res.json({ ok: true });
     }
