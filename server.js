@@ -158,9 +158,9 @@ app.post('/api/telegram-webhook', async (req, res) => {
           console.error('Send error:', err.message);
         }
         
-        // Delay 1s between messages
+        // Delay 500ms between messages
         if (i < messages.length - 1) {
-          await new Promise(resolve => setTimeout(resolve, 1000));
+          await new Promise(resolve => setTimeout(resolve, 500));
         }
       }
       
