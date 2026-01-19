@@ -78,24 +78,61 @@ app.post('/api/telegram-webhook', async (req, res) => {
         return res.json({ ok: true });
       }
       
-      // Send each feedback as a separate message
+      // Send each feedback as a separate message with rowNumber for reply tracking
       for (const fb of userFeedbacks) {
         const shop = fb.shop || 'N/A';
         const tags = fb.tags ? ` ${fb.tags}` : '';
         const note = fb.note || fb.message || '';
         
-        // Check if has image
-        const fileStatus = (fb.imageNote || fb.imageId) ? 'File Feedback' : 'KHÔNG có file';
+        // Check if has link for File Feedback
+        const fileStatus = fb.link ? `File Feedback\n${fb.link}` : 'KHÔNG có file';
         
-        let msg = `${shop} \'=> ${host}${tags}\n${fileStatus}`;
+        // Include [#rowNumber] for reply tracking
+        let msg = `[#${fb.rowNumber}] ${shop} \'=> ${host}${tags}\n${fileStatus}`;
         if (note) {
           msg += `\n${note}`;
         }
+        msg += `\n\n💡 Reply "Done" để đánh dấu hoàn thành`;
         
         await sendTelegramMessage(chatId, msg);
       }
       
       return res.json({ ok: true });
+    }
+    
+    // Handle reply with "Done" to update feedback stage
+    if (message.reply_to_message && text.toLowerCase() === 'done') {
+      const originalText = message.reply_to_message.text || '';
+      
+      // Extract rowNumber from [#123] pattern
+      const match = originalText.match(/\[#(\d+)\]/);
+      if (match) {
+        const rowNumber = parseInt(match[1]);
+        
+        try {
+          // Update stage to Done
+          const now = new Date();
+          const vnTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' }));
+          const d = vnTime.getDate().toString().padStart(2, '0');
+          const m = (vnTime.getMonth() + 1).toString().padStart(2, '0');
+          const y = vnTime.getFullYear();
+          const h = vnTime.getHours().toString().padStart(2, '0');
+          const min = vnTime.getMinutes().toString().padStart(2, '0');
+          const s = vnTime.getSeconds().toString().padStart(2, '0');
+          const timestamp = `${h}:${min}:${s} ${d}/${m}/${y}`;
+          
+          await sheetsClient.updateCell(rowNumber, 'F', 'Done');
+          await sheetsClient.updateCell(rowNumber, 'O', timestamp);
+          
+          await sendTelegramMessage(chatId, `✅ Đã chuyển #${rowNumber} sang Done!`);
+        } catch (error) {
+          await sendTelegramMessage(chatId, `❌ Lỗi: ${error.message}`);
+        }
+        return res.json({ ok: true });
+      } else {
+        await sendTelegramMessage(chatId, `⚠️ Không tìm thấy mã feedback trong tin nhắn gốc`);
+        return res.json({ ok: true });
+      }
     }
     
     // Handle /start command
