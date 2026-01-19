@@ -150,19 +150,11 @@ app.post('/api/telegram-webhook', async (req, res) => {
         return msg;
       });
       
-      // Send messages one by one with 1s delay
-      for (let i = 0; i < messages.length; i++) {
-        try {
-          await sendTelegramMessage(chatId, messages[i], { disable_web_page_preview: true });
-        } catch (err) {
-          console.error('Send error:', err.message);
-        }
-        
-        // Delay 250ms between messages
-        if (i < messages.length - 1) {
-          await new Promise(resolve => setTimeout(resolve, 250));
-        }
-      }
+      // Send all messages in parallel (fastest)
+      await Promise.all(messages.map(msg => 
+        sendTelegramMessage(chatId, msg, { disable_web_page_preview: true })
+          .catch(err => console.error('Send error:', err.message))
+      ));
       
       return res.json({ ok: true });
     }
@@ -230,7 +222,8 @@ app.post('/api/telegram-webhook', async (req, res) => {
             if (remainingFeedbacks.length > 0) {
               await sendTelegramMessage(chatId, `📋 Còn ${remainingFeedbacks.length} feedback:`);
               
-              for (const fb of remainingFeedbacks) {
+              // Prepare all messages
+              const refreshMessages = remainingFeedbacks.map(fb => {
                 const shopName = fb.shop || 'N/A';
                 let noteText = fb.note || fb.message || '';
                 
@@ -240,7 +233,7 @@ app.post('/api/telegram-webhook', async (req, res) => {
                   noteText = noteText.substring(0, MAX_NOTE_LENGTH) + '... (quá dài, xem trên Dashboard)';
                 }
                 
-                // Send everything as plain text in one message
+                // Build message
                 let msg = `• ID: #${fb.rowNumber}\n`;
                 msg += `• Shop: ${shopName}\n`;
                 msg += `• File: ${fb.link || 'KHÔNG có file'}`;
@@ -248,14 +241,14 @@ app.post('/api/telegram-webhook', async (req, res) => {
                   msg += `\n• Note: ${noteText}`;
                 }
                 
-                try {
-                  await sendTelegramMessage(chatId, msg, { 
-                    disable_web_page_preview: true
-                  });
-                } catch (error) {
-                  console.error(`Failed to send feedback #${fb.rowNumber}:`, error.message);
-                }
-              }
+                return msg;
+              });
+              
+              // Send all in parallel (fastest)
+              await Promise.all(refreshMessages.map(msg => 
+                sendTelegramMessage(chatId, msg, { disable_web_page_preview: true })
+                  .catch(err => console.error('Send error:', err.message))
+              ));
             } else {
               await sendTelegramMessage(chatId, `🎉 Không còn feedback nào!`);
             }
