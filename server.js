@@ -138,8 +138,8 @@ async function sendTelegramMessage(chatId, text, options = {}) {
 
 // API Key Middleware
 app.use('/api', (req, res, next) => {
-  // Skip API key check for Telegram webhook
-  if (req.path === '/telegram-webhook') {
+  // Skip API key check for Telegram endpoints
+  if (req.path.startsWith('/telegram-')) {
     return next();
   }
   
