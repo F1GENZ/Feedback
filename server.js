@@ -147,14 +147,23 @@ app.post('/api/telegram-webhook', async (req, res) => {
           msg += `\n• Note: ${note}`;
         }
         
-        return { chatId, msg };
+        return msg;
       });
       
-      // Send all messages in parallel (faster)
-      await Promise.all(messages.map(({ chatId, msg }) => 
-        sendTelegramMessage(chatId, msg, { disable_web_page_preview: true })
-          .catch(err => console.error('Send error:', err.message))
-      ));
+      // Send in batches to avoid rate limit (10 messages per batch, 100ms delay)
+      const BATCH_SIZE = 10;
+      for (let i = 0; i < messages.length; i += BATCH_SIZE) {
+        const batch = messages.slice(i, i + BATCH_SIZE);
+        await Promise.all(batch.map(msg => 
+          sendTelegramMessage(chatId, msg, { disable_web_page_preview: true })
+            .catch(err => console.error('Send error:', err.message))
+        ));
+        
+        // Small delay between batches
+        if (i + BATCH_SIZE < messages.length) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+      }
       
       return res.json({ ok: true });
     }
