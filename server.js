@@ -84,18 +84,15 @@ app.post('/api/telegram-webhook', async (req, res) => {
         const note = fb.note || fb.message || '';
         
         // Check if has link - make File Feedback clickable
-        const fileStatus = fb.link ? `📎 [File Feedback](${fb.link})` : '⚠️ KHÔNG có file';
+        const fileStatus = fb.link ? `[File Feedback](${fb.link})` : 'KHÔNG có file';
         
-        // Beautiful format with emojis
-        // Use zero-width space to hide rowNumber but keep it for reply detection
-        let msg = `━━━━━━━━━━━━━━━\n`;
-        msg += `​#${fb.rowNumber}​\n`; // Zero-width spaces around #ID
-        msg += `🏪 \`${shop}\`\n`;
-        msg += `${fileStatus}\n`;
+        // Simple format with bullet points
+        let msg = `• Shop: \`${shop}\`\n`;
+        msg += `• File: ${fileStatus}\n`;
         if (note) {
-          msg += `💬 ${note}\n`;
+          msg += `• Note: ${note}\n`;
         }
-        msg += `━━━━━━━━━━━━━━━`;
+        msg += `\n_#${fb.rowNumber}_`; // ID at end in italic (smaller)
         
         await sendTelegramMessage(chatId, msg, { parse_mode: 'Markdown', disable_web_page_preview: true });
       }
