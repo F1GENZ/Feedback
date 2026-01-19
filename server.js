@@ -752,9 +752,20 @@ app.get('/api/exec', async (req, res) => {
 // Telegram Image Proxy Endpoint (uses old bot token for image access)
 app.get('/api/telegram-image', async (req, res) => {
   const fileId = req.query.fileId;
+  const rowNumber = req.query.rowNumber; // Optional: to update Sheet
   
   if (!fileId) {
     return res.json({ success: false, message: 'Missing fileId parameter' });
+  }
+  
+  // If already a URL, return it directly
+  if (fileId.startsWith('http://') || fileId.startsWith('https://')) {
+    return res.json({ success: true, url: fileId });
+  }
+  
+  // Check cache first
+  if (imageUrlCache.has(fileId)) {
+    return res.json({ success: true, url: imageUrlCache.get(fileId) });
   }
   
   // Use separate token for image proxy (old bot that has access to images)
@@ -775,10 +786,53 @@ app.get('/api/telegram-image', async (req, res) => {
     const filePath = data.result.file_path;
     const fileUrl = `https://api.telegram.org/file/bot${botToken}/${filePath}`;
     
+    // Download and upload to R2 for permanent URL
+    try {
+      const downloadResponse = await fetch(fileUrl);
+      if (downloadResponse.ok) {
+        const arrayBuffer = await downloadResponse.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
+        
+        // Upload to R2
+        const s3Client = new S3Client({
+          region: 'auto',
+          endpoint: `https://${process.env.CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+          credentials: {
+            accessKeyId: process.env.CLOUDFLARE_R2_ACCESS_KEY_ID,
+            secretAccessKey: process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY,
+          },
+        });
+        
+        const fileName = `telegram/${Date.now()}_${filePath.split('/').pop()}`;
+        await s3Client.send(new PutObjectCommand({
+          Bucket: process.env.CLOUDFLARE_R2_BUCKET_NAME,
+          Key: fileName,
+          Body: buffer,
+          ContentType: 'image/jpeg',
+        }));
+        
+        const r2Url = `${process.env.CLOUDFLARE_CDN_URL}/${fileName}`;
+        
+        // Cache it
+        imageUrlCache.set(fileId, r2Url);
+        
+        // Update Sheet if rowNumber provided
+        if (rowNumber) {
+          await sheetsClient.updateCell(parseInt(rowNumber), 'N', r2Url);
+          console.log(`Updated Sheet row ${rowNumber} with R2 URL`);
+        }
+        
+        return res.json({ success: true, url: r2Url });
+      }
+    } catch (uploadError) {
+      console.error('Failed to upload to R2:', uploadError.message);
+    }
+    
+    // Fallback to Telegram URL (temporary)
     return res.json({ 
       success: true, 
       url: fileUrl,
-      fileId: fileId
+      temporary: true
     });
   } catch (error) {
     console.error('Telegram API Error:', error);
@@ -884,6 +938,10 @@ async function createFeedback(feedback) {
 
   const success = await sheetsClient.appendRow(row);
   if (success) {
+    // Notify host if stage is Feedback
+    if ((feedback.stage || 'Feedback') === 'Feedback' && feedback.host) {
+      await notifyHostFeedbackCount(feedback.host);
+    }
     // await sheetsClient.logHistory('CREATE', `Tạo feedback: ${feedback.shop || 'N/A'}`); // DISABLED
     return { success: true, message: 'Đã tạo feedback thành công!' };
   } else {
@@ -961,6 +1019,12 @@ async function updateFeedback(rowNumber, updates) {
   newRow[14] = `${h}:${min}:${s} ${d}/${m}/${y}`;
   
   await sheetsClient.updateRow(rowNumber, newRow);
+  
+  // Notify host if stage changed to Feedback
+  if (updates.stage === 'Feedback' && newRow[2]) {
+    await notifyHostFeedbackCount(newRow[2]);
+  }
+  
   return { success: true, message: 'Cập nhật thành công!' };
 }
 
