@@ -324,7 +324,7 @@ async function uploadTelegramPhotoToR2(fileId) {
     const filename = `telegram/${Date.now()}-${crypto.randomUUID()}.${ext}`;
     
     await s3Client.send(new PutObjectCommand({
-      Bucket: process.env.CLOUDFLARE_R2_BUCKET_NAME,
+      Bucket: process.env.CLOUDFLARE_R2_BUCKET_NAME.trim(),
       Key: filename,
       Body: buffer,
       ContentType: `image/${ext}`
