@@ -10,15 +10,143 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
+// Telegram username to Host mapping
+const TELEGRAM_TO_HOST = {
+  'masterquoc': 'Quốc',
+  'Master Quốc': 'Quốc',
+  'duylam1015': 'Lâm',
+  'taizpro': 'Taiz',
+  'tuandev': 'Tuan',
+  'nghiadev': 'Nghĩa'
+};
+
+// ==================== TELEGRAM BOT WEBHOOK ====================
+app.post('/api/telegram-webhook', async (req, res) => {
+  try {
+    const update = req.body;
+    
+    // Only process message updates
+    if (!update.message) {
+      return res.json({ ok: true });
+    }
+    
+    const message = update.message;
+    const chatId = message.chat.id;
+    const text = (message.text || '').trim();
+    const username = message.from.username || message.from.first_name || 'Unknown';
+    const firstName = message.from.first_name || username;
+    
+    // Handle // command - show user's feedbacks
+    if (text === '//') {
+      // Find host based on Telegram username
+      const host = TELEGRAM_TO_HOST[username] || TELEGRAM_TO_HOST[firstName] || null;
+      
+      if (!host) {
+        await sendTelegramMessage(chatId, `⚠️ Không tìm thấy host mapping cho user: ${username}\n\nLiên hệ admin để được thêm vào hệ thống.`);
+        return res.json({ ok: true });
+      }
+      
+      // Get feedbacks for this host
+      const data = await sheetsClient.getAllData();
+      const rows = data.rows || [];
+      
+      // Filter feedbacks: stage = "Feedback" và host = user's host
+      const userFeedbacks = rows.filter(r => 
+        r.host === host && 
+        (r.stage === 'Feedback' || r.stage === 'Đã báo khách')
+      );
+      
+      if (userFeedbacks.length === 0) {
+        await sendTelegramMessage(chatId, `✅ Không có feedback nào cho ${host}`);
+        return res.json({ ok: true });
+      }
+      
+      // Format response - each feedback on separate lines
+      let response = '';
+      userFeedbacks.forEach(fb => {
+        const shop = fb.shop || 'N/A';
+        const stageLabel = fb.stage === 'Feedback' ? '' : ' gap';
+        const tags = fb.tags ? ` ${fb.tags}` : '';
+        const note = fb.note || fb.message || '';
+        
+        // Check if has image
+        const fileStatus = (fb.imageNote || fb.imageId) ? 'File Feedback' : 'KHÔNG có file';
+        
+        response += `${shop} \'=> ${host}${stageLabel}${tags}\n`;
+        response += `${fileStatus}\n`;
+        if (note) {
+          response += `${note}\n`;
+        }
+        response += '\n';
+      });
+      
+      await sendTelegramMessage(chatId, response.trim());
+      return res.json({ ok: true });
+    }
+    
+    // Handle /start command
+    if (text === '/start') {
+      await sendTelegramMessage(chatId, 
+        `👋 Xin chào ${firstName}!\n\n` +
+        `🔹 Gõ // để xem feedback của bạn\n` +
+        `🔹 Gõ /help để xem hướng dẫn`
+      );
+      return res.json({ ok: true });
+    }
+    
+    // Handle /help command
+    if (text === '/help') {
+      await sendTelegramMessage(chatId,
+        `📚 *Hướng dẫn sử dụng Bot*\n\n` +
+        `\`//\` - Xem danh sách feedback của bạn\n` +
+        `\`/start\` - Bắt đầu\n` +
+        `\`/help\` - Xem hướng dẫn`,
+        { parse_mode: 'Markdown' }
+      );
+      return res.json({ ok: true });
+    }
+    
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('Telegram webhook error:', error);
+    res.json({ ok: true }); // Always return ok to Telegram
+  }
+});
+
+// Send message to Telegram
+async function sendTelegramMessage(chatId, text, options = {}) {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  if (!botToken) {
+    console.error('TELEGRAM_BOT_TOKEN not configured');
+    return;
+  }
+  
+  try {
+    await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: text,
+        ...options
+      })
+    });
+  } catch (error) {
+    console.error('Failed to send Telegram message:', error);
+  }
+}
+
 // API Key Middleware
 app.use('/api', (req, res, next) => {
+  // Skip API key check for Telegram webhook
+  if (req.path === '/telegram-webhook') {
+    return next();
+  }
+  
   const apiKey = req.headers['x-api-key'];
   const validKey = process.env.API_KEY;
   
   if (!validKey) {
-    // If no key configured on server, warning but allow? 
-    // Or better: Fail closed. But for now let's blocking if key IS configured.
-    // If .env has key, we require it.
     console.warn('API_KEY not set in .env! Securing is disabled.');
     return next();
   }
@@ -27,6 +155,55 @@ app.use('/api', (req, res, next) => {
     return res.status(403).json({ success: false, message: 'Forbidden: Invalid API Key' });
   }
   next();
+});
+
+// Telegram Webhook Setup Endpoint
+app.get('/api/telegram-setup', async (req, res) => {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  if (!botToken) {
+    return res.json({ success: false, message: 'TELEGRAM_BOT_TOKEN not configured' });
+  }
+  
+  // Get the webhook URL from query or use default
+  const webhookUrl = req.query.url || `https://api-feedback.f1genz.dev/api/telegram-webhook`;
+  
+  try {
+    // Set webhook
+    const response = await fetch(`https://api.telegram.org/bot${botToken}/setWebhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: webhookUrl })
+    });
+    const result = await response.json();
+    
+    if (result.ok) {
+      return res.json({ 
+        success: true, 
+        message: `Webhook đã được thiết lập: ${webhookUrl}`,
+        result 
+      });
+    } else {
+      return res.json({ success: false, message: result.description || 'Failed to set webhook', result });
+    }
+  } catch (error) {
+    return res.json({ success: false, message: error.message });
+  }
+});
+
+// Get Telegram Webhook Info
+app.get('/api/telegram-info', async (req, res) => {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  if (!botToken) {
+    return res.json({ success: false, message: 'TELEGRAM_BOT_TOKEN not configured' });
+  }
+  
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${botToken}/getWebhookInfo`);
+    const result = await response.json();
+    return res.json({ success: true, webhookInfo: result.result });
+  } catch (error) {
+    return res.json({ success: false, message: error.message });
+  }
 });
 
 // Routes
@@ -120,7 +297,7 @@ app.get('/api/exec', async (req, res) => {
   }
 });
 
-// Telegram Image Proxy Endpoint
+// Telegram Image Proxy Endpoint (uses old bot token for image access)
 app.get('/api/telegram-image', async (req, res) => {
   const fileId = req.query.fileId;
   
@@ -128,7 +305,8 @@ app.get('/api/telegram-image', async (req, res) => {
     return res.json({ success: false, message: 'Missing fileId parameter' });
   }
   
-  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  // Use separate token for image proxy (old bot that has access to images)
+  const botToken = process.env.TELEGRAM_IMAGE_BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN;
   if (!botToken) {
     return res.json({ success: false, message: 'Telegram bot token not configured' });
   }
