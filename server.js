@@ -81,17 +81,21 @@ app.post('/api/telegram-webhook', async (req, res) => {
       // Send each feedback as a separate message with rowNumber for reply tracking
       for (const fb of userFeedbacks) {
         const shop = fb.shop || 'N/A';
-        const tags = fb.tags ? ` ${fb.tags}` : '';
         const note = fb.note || fb.message || '';
         
         // Check if has link - make File Feedback clickable
-        const fileStatus = fb.link ? `[File Feedback](${fb.link})` : 'KHÔNG có file';
+        const fileStatus = fb.link ? `📎 [File Feedback](${fb.link})` : '⚠️ KHÔNG có file';
         
-        // Include #rowNumber for reply tracking (avoid [] which conflicts with Markdown)
-        let msg = `#${fb.rowNumber} ${shop} \'=> ${host}${tags}\n${fileStatus}`;
+        // Beautiful format with emojis
+        // Use zero-width space to hide rowNumber but keep it for reply detection
+        let msg = `━━━━━━━━━━━━━━━\n`;
+        msg += `​#${fb.rowNumber}​\n`; // Zero-width spaces around #ID
+        msg += `🏪 \`${shop}\`\n`;
+        msg += `${fileStatus}\n`;
         if (note) {
-          msg += `\n${note}`;
+          msg += `💬 ${note}\n`;
         }
+        msg += `━━━━━━━━━━━━━━━`;
         
         await sendTelegramMessage(chatId, msg, { parse_mode: 'Markdown', disable_web_page_preview: true });
       }
@@ -99,37 +103,49 @@ app.post('/api/telegram-webhook', async (req, res) => {
       return res.json({ ok: true });
     }
     
-    // Handle reply with "Done" to update feedback stage
-    if (message.reply_to_message && text.toLowerCase() === 'done') {
+    // Handle reply to feedback messages (with #rowNumber)
+    if (message.reply_to_message) {
       const originalText = message.reply_to_message.text || '';
       
       // Extract rowNumber from #123 pattern
       const match = originalText.match(/#(\d+)\s/);
       if (match) {
         const rowNumber = parseInt(match[1]);
+        const lowerText = text.toLowerCase();
         
         try {
-          // Update stage to Done
-          const now = new Date();
-          const vnTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' }));
-          const d = vnTime.getDate().toString().padStart(2, '0');
-          const m = (vnTime.getMonth() + 1).toString().padStart(2, '0');
-          const y = vnTime.getFullYear();
-          const h = vnTime.getHours().toString().padStart(2, '0');
-          const min = vnTime.getMinutes().toString().padStart(2, '0');
-          const s = vnTime.getSeconds().toString().padStart(2, '0');
-          const timestamp = `${h}:${min}:${s} ${d}/${m}/${y}`;
-          
-          await sheetsClient.updateCell(rowNumber, 'F', 'Done');
-          await sheetsClient.updateCell(rowNumber, 'O', timestamp);
-          
-          await sendTelegramMessage(chatId, `✅ Đã chuyển #${rowNumber} sang Done!`);
+          // Check if message starts with "Done"
+          if (lowerText === 'done' || lowerText.startsWith('done ') || lowerText.startsWith('done-') || lowerText.startsWith('done:')) {
+            // Update stage to Done
+            const now = new Date();
+            const vnTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' }));
+            const d = vnTime.getDate().toString().padStart(2, '0');
+            const m = (vnTime.getMonth() + 1).toString().padStart(2, '0');
+            const y = vnTime.getFullYear();
+            const h = vnTime.getHours().toString().padStart(2, '0');
+            const min = vnTime.getMinutes().toString().padStart(2, '0');
+            const s = vnTime.getSeconds().toString().padStart(2, '0');
+            const timestamp = `${h}:${min}:${s} ${d}/${m}/${y}`;
+            
+            await sheetsClient.updateCell(rowNumber, 'F', 'Done');
+            await sheetsClient.updateCell(rowNumber, 'O', timestamp);
+            
+            // If there's additional text after "Done", add as comment
+            const extraText = text.replace(/^done[\s\-:]*/i, '').trim();
+            if (extraText) {
+              await addCommentToFeedback(rowNumber, `[Telegram] ${firstName}: ${extraText}`);
+              await sendTelegramMessage(chatId, `✅ #${rowNumber} → Done + thêm comment!`);
+            } else {
+              await sendTelegramMessage(chatId, `✅ #${rowNumber} → Done!`);
+            }
+          } else {
+            // Any other reply → add as comment
+            await addCommentToFeedback(rowNumber, `[Telegram] ${firstName}: ${text}`);
+            await sendTelegramMessage(chatId, `💬 Đã thêm comment vào #${rowNumber}`);
+          }
         } catch (error) {
           await sendTelegramMessage(chatId, `❌ Lỗi: ${error.message}`);
         }
-        return res.json({ ok: true });
-      } else {
-        await sendTelegramMessage(chatId, `⚠️ Không tìm thấy mã feedback trong tin nhắn gốc`);
         return res.json({ ok: true });
       }
     }
@@ -184,6 +200,48 @@ async function sendTelegramMessage(chatId, text, options = {}) {
   } catch (error) {
     console.error('Failed to send Telegram message:', error);
   }
+}
+
+// Add comment to feedback (for Telegram integration)
+async function addCommentToFeedback(rowNumber, commentText) {
+  const currentRow = await sheetsClient.getRow(rowNumber);
+  let comments = [];
+  
+  const currentContent = currentRow[7] || '';
+  if (currentContent) {
+    if (currentContent.trim().startsWith('[') && currentContent.trim().endsWith(']')) {
+      try {
+        comments = JSON.parse(currentContent);
+        if (!Array.isArray(comments)) comments = [];
+      } catch (e) {
+        comments = [];
+      }
+    } else {
+      comments.push({
+        text: currentContent,
+        time: 'Note cũ',
+        author: 'System'
+      });
+    }
+  }
+
+  // Create new comment with VN Timezone
+  const now = new Date();
+  const vnTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' }));
+  const d = vnTime.getDate().toString().padStart(2, '0');
+  const m = (vnTime.getMonth() + 1).toString().padStart(2, '0');
+  const y = vnTime.getFullYear();
+  const h = vnTime.getHours().toString().padStart(2, '0');
+  const min = vnTime.getMinutes().toString().padStart(2, '0');
+  const timestamp = `${h}:${min} ${d}/${m}/${y}`;
+  
+  comments.push({
+    text: commentText,
+    time: timestamp,
+    author: 'Telegram'
+  });
+
+  await sheetsClient.updateCell(rowNumber, 'H', JSON.stringify(comments));
 }
 
 // API Key Middleware
