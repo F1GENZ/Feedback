@@ -103,15 +103,18 @@ app.post('/api/telegram-webhook', async (req, res) => {
       return res.json({ ok: true });
     }
     
-    // Handle reply to feedback messages (with hidden #rowNumber in spoiler)
+    // Handle reply to feedback messages (with ID in text)
     if (message.reply_to_message) {
       const originalText = message.reply_to_message.text || '';
       
-      // Extract rowNumber from spoiler ||#123|| or visible #123
+      // Extract rowNumber from #123 pattern
       const match = originalText.match(/#(\d+)/);
       if (match) {
         const rowNumber = parseInt(match[1]);
-        const lowerText = text.toLowerCase();
+        
+        // Get text from either message.text or message.caption (for photo replies)
+        const replyText = text || message.caption || '';
+        const lowerText = replyText.toLowerCase();
         
         try {
           // Check if message starts with "Done"
@@ -130,10 +133,21 @@ app.post('/api/telegram-webhook', async (req, res) => {
             await sheetsClient.updateCell(rowNumber, 'F', 'Done');
             await sheetsClient.updateCell(rowNumber, 'O', timestamp);
             
-            // If there's additional text after "Done", add as comment
-            const extraText = text.replace(/^done[\s\-:]*/i, '').trim();
-            if (extraText) {
-              await addCommentToFeedback(rowNumber, `[Telegram] ${firstName}: ${extraText}`);
+            // If there's additional text after "Done" or photo, add as comment
+            const extraText = replyText.replace(/^done[\s\-:]*/i, '').trim();
+            let commentText = '';
+            
+            if (message.photo && message.photo.length > 0) {
+              // Get largest photo
+              const photo = message.photo[message.photo.length - 1];
+              const photoUrl = await getTelegramFileUrl(photo.file_id);
+              commentText = `[Telegram] ${firstName}: ${extraText || 'Done'}\n${photoUrl}`;
+            } else if (extraText) {
+              commentText = `[Telegram] ${firstName}: ${extraText}`;
+            }
+            
+            if (commentText) {
+              await addCommentToFeedback(rowNumber, commentText);
             }
             
             await sendTelegramMessage(chatId, `✅ #${rowNumber} → Done!`);
@@ -170,7 +184,15 @@ app.post('/api/telegram-webhook', async (req, res) => {
             }
           } else {
             // Any other reply → add as comment
-            await addCommentToFeedback(rowNumber, `[Telegram] ${firstName}: ${text}`);
+            let commentText = `[Telegram] ${firstName}: ${replyText}`;
+            
+            if (message.photo && message.photo.length > 0) {
+              const photo = message.photo[message.photo.length - 1];
+              const photoUrl = await getTelegramFileUrl(photo.file_id);
+              commentText += `\n${photoUrl}`;
+            }
+            
+            await addCommentToFeedback(rowNumber, commentText);
             await sendTelegramMessage(chatId, `💬 Đã thêm comment vào #${rowNumber}`);
           }
         } catch (error) {
@@ -229,6 +251,27 @@ async function sendTelegramMessage(chatId, text, options = {}) {
     });
   } catch (error) {
     console.error('Failed to send Telegram message:', error);
+  }
+}
+
+// Get Telegram file URL from file_id
+async function getTelegramFileUrl(fileId) {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  if (!botToken) {
+    return 'Error: Bot token not configured';
+  }
+  
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${botToken}/getFile?file_id=${fileId}`);
+    const data = await response.json();
+    
+    if (data.ok && data.result && data.result.file_path) {
+      return `https://api.telegram.org/file/bot${botToken}/${data.result.file_path}`;
+    }
+    return 'Error: Could not get file URL';
+  } catch (error) {
+    console.error('Failed to get Telegram file URL:', error);
+    return 'Error: ' + error.message;
   }
 }
 
