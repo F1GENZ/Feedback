@@ -291,7 +291,7 @@ app.post('/api/telegram-webhook', async (req, res) => {
         `📚 *Hướng dẫn sử dụng Bot*\n\n` +
         `*📋 Xem feedback:*\n` +
         `• \`//\` - Xem feedback của bạn\n` +
-        `• \`// Tên\` - Xem feedback của người khác\n` +
+        `• \`// Tên\` - Xem feedback của người khác\n\n` +
         `*✅ Xử lý feedback:*\n` +
         `• Reply tin nhắn feedback với \`Done\` - Đánh dấu hoàn thành\n` +
         `• Reply với text/ảnh khác - Thêm comment\n\n` +
