@@ -252,11 +252,11 @@ app.post('/api/telegram-webhook', async (req, res) => {
                 }
                 
                 // Build caption/message
-                let caption = `• ID: #${fb.rowNumber}\\n`;
-                caption += `• Shop: ${shopName}\\n`;
+                let caption = `• ID: #${fb.rowNumber}\n`;
+                caption += `• Shop: ${shopName}\n`;
                 caption += `• File: ${fb.link || 'KHÔNG có file'}`;
                 if (noteText) {
-                  caption += `\\n• Note: ${noteText}`;
+                  caption += `\n• Note: ${noteText}`;
                 }
                 
                 try {
@@ -268,7 +268,7 @@ app.post('/api/telegram-webhook', async (req, res) => {
                 } catch (err) {
                   console.error('Send error:', err.message);
                   if (fb.imageId) {
-                    await sendTelegramMessage(chatId, caption + '\\n\\n📷 (Không thể tải ảnh)', { disable_web_page_preview: true })
+                    await sendTelegramMessage(chatId, caption + '\n\n📷 (Không thể tải ảnh)', { disable_web_page_preview: true })
                       .catch(e => console.error('Fallback error:', e.message));
                   }
                 }
