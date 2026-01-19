@@ -129,8 +129,9 @@ app.post('/api/telegram-webhook', async (req, res) => {
       });
       
       
-      // Prepare and send all messages
-      for (const fb of userFeedbacks) {
+      
+      // Prepare all messages in parallel (faster)
+      const sendPromises = userFeedbacks.map(async (fb) => {
         const shop = fb.shop || 'N/A';
         let note = fb.note || fb.message || '';
         
@@ -164,7 +165,10 @@ app.post('/api/telegram-webhook', async (req, res) => {
               .catch(e => console.error('Fallback error:', e.message));
           }
         }
-      }
+      });
+      
+      // Send all in parallel (much faster)
+      await Promise.all(sendPromises);
       
       return res.json({ ok: true });
     }
@@ -229,11 +233,12 @@ app.post('/api/telegram-webhook', async (req, res) => {
               r.host === TELEGRAM_ID_TO_HOST[userId] && r.stage === 'Feedback'
             );
             
+            
             if (remainingFeedbacks.length > 0) {
               await sendTelegramMessage(chatId, `📋 Còn ${remainingFeedbacks.length} feedback:`);
               
-              // Send each feedback (with photo if available)
-              for (const fb of remainingFeedbacks) {
+              // Send all in parallel (faster)
+              const refreshPromises = remainingFeedbacks.map(async (fb) => {
                 const shopName = fb.shop || 'N/A';
                 let noteText = fb.note || fb.message || '';
                 
@@ -244,11 +249,11 @@ app.post('/api/telegram-webhook', async (req, res) => {
                 }
                 
                 // Build caption/message
-                let caption = `• ID: #${fb.rowNumber}\n`;
-                caption += `• Shop: ${shopName}\n`;
+                let caption = `• ID: #${fb.rowNumber}\\n`;
+                caption += `• Shop: ${shopName}\\n`;
                 caption += `• File: ${fb.link || 'KHÔNG có file'}`;
                 if (noteText) {
-                  caption += `\n• Note: ${noteText}`;
+                  caption += `\\n• Note: ${noteText}`;
                 }
                 
                 try {
@@ -260,11 +265,13 @@ app.post('/api/telegram-webhook', async (req, res) => {
                 } catch (err) {
                   console.error('Send error:', err.message);
                   if (fb.imageId) {
-                    await sendTelegramMessage(chatId, caption + '\n\n📷 (Không thể tải ảnh)', { disable_web_page_preview: true })
+                    await sendTelegramMessage(chatId, caption + '\\n\\n📷 (Không thể tải ảnh)', { disable_web_page_preview: true })
                       .catch(e => console.error('Fallback error:', e.message));
                   }
                 }
-              }
+              });
+              
+              await Promise.all(refreshPromises);
             } else {
               await sendTelegramMessage(chatId, `🎉 Không còn feedback nào!`);
             }
