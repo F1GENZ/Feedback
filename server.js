@@ -289,9 +289,16 @@ app.post('/api/telegram-webhook', async (req, res) => {
     if (text === '/help') {
       await sendTelegramMessage(chatId,
         `📚 *Hướng dẫn sử dụng Bot*\n\n` +
-        `\`//\` - Xem danh sách feedback của bạn\n` +
-        `\`/start\` - Bắt đầu\n` +
-        `\`/help\` - Xem hướng dẫn`,
+        `*📋 Xem feedback:*\n` +
+        `• \`//\` - Xem feedback của bạn\n` +
+        `• \`// [tên]\` - Xem feedback của người khác\n` +
+        `  Ví dụ: \`// lam\`, \`// quoc\`, \`// taiz\`\n\n` +
+        `*✅ Xử lý feedback:*\n` +
+        `• Reply tin nhắn feedback với \`Done\` - Đánh dấu hoàn thành\n` +
+        `• Reply với text/ảnh khác - Thêm comment\n\n` +
+        `*🔧 Lệnh khác:*\n` +
+        `• \`/start\` - Bắt đầu\n` +
+        `• \`/help\` - Xem hướng dẫn này`,
         { parse_mode: 'Markdown' }
       );
       return res.json({ ok: true });
