@@ -84,17 +84,16 @@ app.post('/api/telegram-webhook', async (req, res) => {
         const tags = fb.tags ? ` ${fb.tags}` : '';
         const note = fb.note || fb.message || '';
         
-        // Check if has link for File Feedback
-        const fileStatus = fb.link ? `File Feedback\n${fb.link}` : 'KHÔNG có file';
+        // Check if has link - make File Feedback clickable
+        const fileStatus = fb.link ? `[File Feedback](${fb.link})` : 'KHÔNG có file';
         
         // Include [#rowNumber] for reply tracking
         let msg = `[#${fb.rowNumber}] ${shop} \'=> ${host}${tags}\n${fileStatus}`;
         if (note) {
           msg += `\n${note}`;
         }
-        msg += `\n\n💡 Reply "Done" để đánh dấu hoàn thành`;
         
-        await sendTelegramMessage(chatId, msg);
+        await sendTelegramMessage(chatId, msg, { parse_mode: 'Markdown' });
       }
       
       return res.json({ ok: true });
