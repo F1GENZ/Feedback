@@ -362,27 +362,55 @@ async function sendTelegramPhoto(chatId, fileId, caption = '', options = {}) {
   }
   
   try {
-    // First, try to get file info using old bot (images were uploaded with old bot)
-    let photoToSend = fileId; // Default to file_id
+    // Strategy: Get image from old bot, upload to R2, send R2 URL via new bot
+    let photoToSend = fileId;
     
+    // Try to get file from old bot first (since images were uploaded with old bot)
     if (oldBotToken) {
       try {
-        // Get file info from old bot
         const fileResponse = await fetch(`https://api.telegram.org/bot${oldBotToken}/getFile?file_id=${fileId}`);
-        const fileResult = await fileResponse.json();
+        const fileData = await fileResponse.json();
         
-        if (fileResult.ok && fileResult.result.file_path) {
-          // Construct file URL from old bot
-          const fileUrl = `https://api.telegram.org/file/bot${oldBotToken}/${fileResult.result.file_path}`;
-          photoToSend = fileUrl; // Use URL instead of file_id
-          console.log('Using file URL from old bot:', fileUrl);
+        if (fileData.ok && fileData.result && fileData.result.file_path) {
+          const filePath = fileData.result.file_path;
+          const fileUrl = `https://api.telegram.org/file/bot${oldBotToken}/${filePath}`;
+          
+          // Download and upload to R2
+          const downloadResponse = await fetch(fileUrl);
+          if (downloadResponse.ok) {
+            const arrayBuffer = await downloadResponse.arrayBuffer();
+            const buffer = Buffer.from(arrayBuffer);
+            
+            // Upload to R2
+            const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+            const s3Client = new S3Client({
+              region: 'auto',
+              endpoint: `https://${process.env.CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+              credentials: {
+                accessKeyId: process.env.CLOUDFLARE_R2_ACCESS_KEY_ID,
+                secretAccessKey: process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY,
+              },
+            });
+            
+            const fileName = `telegram/${Date.now()}_${filePath.split('/').pop()}`;
+            await s3Client.send(new PutObjectCommand({
+              Bucket: process.env.CLOUDFLARE_R2_BUCKET_NAME,
+              Key: fileName,
+              Body: buffer,
+              ContentType: 'image/jpeg',
+            }));
+            
+            // Use R2 CDN URL
+            photoToSend = `${process.env.CLOUDFLARE_CDN_URL}/${fileName}`;
+            console.log('Uploaded to R2:', photoToSend);
+          }
         }
       } catch (err) {
-        console.log('Could not get file from old bot, trying with file_id directly:', err.message);
+        console.log('Could not process with old bot, using file_id:', err.message);
       }
     }
     
-    // Send photo using CURRENT bot (so message comes from current bot)
+    // Send photo using CURRENT bot
     const response = await fetch(`https://api.telegram.org/bot${botToken}/sendPhoto`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -400,7 +428,7 @@ async function sendTelegramPhoto(chatId, fileId, caption = '', options = {}) {
     }
   } catch (error) {
     console.error('Failed to send Telegram photo:', error);
-    throw error; // Re-throw to trigger fallback
+    throw error;
   }
 }
 
