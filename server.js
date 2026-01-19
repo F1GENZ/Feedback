@@ -68,10 +68,9 @@ app.post('/api/telegram-webhook', async (req, res) => {
       const data = await sheetsClient.getAllData();
       const rows = data.rows || [];
       
-      // Filter feedbacks: stage = "Feedback" và host = user's host
+      // Filter feedbacks: stage = "Feedback" only
       const userFeedbacks = rows.filter(r => 
-        r.host === host && 
-        (r.stage === 'Feedback' || r.stage === 'Đã báo khách')
+        r.host === host && r.stage === 'Feedback'
       );
       
       if (userFeedbacks.length === 0) {
@@ -79,26 +78,23 @@ app.post('/api/telegram-webhook', async (req, res) => {
         return res.json({ ok: true });
       }
       
-      // Format response - each feedback on separate lines
-      let response = '';
-      userFeedbacks.forEach(fb => {
+      // Send each feedback as a separate message
+      for (const fb of userFeedbacks) {
         const shop = fb.shop || 'N/A';
-        const stageLabel = fb.stage === 'Feedback' ? '' : ' gap';
         const tags = fb.tags ? ` ${fb.tags}` : '';
         const note = fb.note || fb.message || '';
         
         // Check if has image
         const fileStatus = (fb.imageNote || fb.imageId) ? 'File Feedback' : 'KHÔNG có file';
         
-        response += `${shop} \'=> ${host}${stageLabel}${tags}\n`;
-        response += `${fileStatus}\n`;
+        let msg = `${shop} \'=> ${host}${tags}\n${fileStatus}`;
         if (note) {
-          response += `${note}\n`;
+          msg += `\n${note}`;
         }
-        response += '\n';
-      });
+        
+        await sendTelegramMessage(chatId, msg);
+      }
       
-      await sendTelegramMessage(chatId, response.trim());
       return res.json({ ok: true });
     }
     
