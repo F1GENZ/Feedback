@@ -169,13 +169,10 @@ app.post('/api/telegram-webhook', async (req, res) => {
       return res.json({ ok: true });
     }
     
-    // Handle /r commands - Read feedbacks (/r, /r all, /r Tên, /r shop)
-    if (text === '/r' || text.startsWith('/r ') || text.startsWith('/r@')) {
-      const cmdRaw = text.replace(/@\S+/, '').trim();
-      const parts = cmdRaw.split(/\s+/);
-      const keyword = parts.length > 1 ? parts.slice(1).join(' ').toLowerCase() : '';
+    // Handle // command - Read feedbacks (//, // all, // Tên, // shop)
+    if (text === '//' || text.startsWith('// ')) {
+      const keyword = text.startsWith('// ') ? text.substring(3).trim().toLowerCase() : '';
       const isAll = keyword === 'all';
-      let searchKeyword = isAll ? '' : keyword;
       
       const currentUserHost = TELEGRAM_ID_TO_HOST[userId] || firstName;
       const data = await sheetsClient.getAllData();
@@ -184,14 +181,17 @@ app.post('/api/telegram-webhook', async (req, res) => {
       let filtered;
       if (isAll) {
         filtered = rows.filter(r => r.stage === 'Feedback');
-      } else if (searchKeyword) {
-        const matchedHost = HOST_ALIAS_MAP[searchKeyword];
+      } else if (keyword) {
+        // Check if keyword matches a host name
+        const matchedHost = HOST_ALIAS_MAP[keyword];
         if (matchedHost) {
           filtered = rows.filter(r => r.host === matchedHost && r.stage === 'Feedback');
         } else {
-          filtered = rows.filter(r => r.stage === 'Feedback' && r.shop && r.shop.toLowerCase().includes(searchKeyword));
+          // Search by shop name
+          filtered = rows.filter(r => r.stage === 'Feedback' && r.shop && r.shop.toLowerCase().includes(keyword));
         }
       } else {
+        // // without keyword → own feedbacks
         filtered = rows.filter(r => r.host === currentUserHost && r.stage === 'Feedback');
       }
       
@@ -206,87 +206,9 @@ app.post('/api/telegram-webhook', async (req, res) => {
       });
       
       for (const fb of filtered) {
-        let noteText = fb.note || fb.message || '';
-        if (noteText.length > 500) noteText = noteText.substring(0, 500) + '...';
-        let caption = `• ID: #${fb.rowNumber}\n• Shop: ${fb.shop || 'N/A'}\n• File:\n${fb.link || 'KHÔNG có file'}`;
-        if (noteText) caption += `\n• Note: ${noteText}`;
-        try {
-          if (fb.imageId && !fb.imageId.startsWith('http')) {
-            await sendTelegramPhoto(chatId, fb.imageId, caption, { disable_web_page_preview: true }, fb.rowNumber);
-          } else {
-            await sendTelegramMessage(chatId, caption, { disable_web_page_preview: true });
-          }
-        } catch (err) {
-          await sendTelegramMessage(chatId, caption + '\n\n📷 (Không thể tải ảnh)', { disable_web_page_preview: true }).catch(() => {});
-        }
-      }
-      return res.json({ ok: true });
-    }
-    
-    // Handle // command - show user's feedbacks or // <Host> for specific host
-    if (text === '//' || text.startsWith('// ')) {
-      // Find current user's host
-      const currentUserHost = TELEGRAM_ID_TO_HOST[userId] || null;
-      
-      if (!currentUserHost) {
-        await sendTelegramMessage(chatId, 
-          `⚠️ Chưa được đăng ký trong hệ thống\n\n` +
-          `🆔 User ID của bạn: \`${userId}\`\n\n` +
-          `Gửi ID này cho admin để được thêm vào.`,
-          { parse_mode: 'Markdown' }
-        );
-        return res.json({ ok: true });
-      }
-      
-      // Determine which host to query
-      let targetHost = currentUserHost;
-      if (text.startsWith('// ')) {
-        const requestedHost = text.substring(3).trim();
-        // Map common variations
-        const hostMap = {
-          'quoc': 'Quốc',
-          'quốc': 'Quốc',
-          'taiz': 'Taiz',
-          'tai': 'Taiz',
-          'tài': 'Taiz',
-          'lam': 'Lâm',
-          'lâm': 'Lâm',
-          'nghia': 'Nghĩa',
-          'nghĩa': 'Nghĩa',
-          'tuan': 'Tuan',
-          'tuấn': 'Tuan'
-        };
-        targetHost = hostMap[requestedHost.toLowerCase()] || requestedHost;
-      }
-      
-      // Get feedbacks for target host
-      const data = await sheetsClient.getAllData();
-      const rows = data.rows || [];
-      
-      // Filter feedbacks: stage = "Feedback" only
-      const userFeedbacks = rows.filter(r => 
-        r.host === targetHost && r.stage === 'Feedback'
-      );
-      
-      if (userFeedbacks.length === 0) {
-        await sendTelegramMessage(chatId, `✅ Không có feedback nào cho ${targetHost}`);
-        return res.json({ ok: true });
-      }
-      
-      // Show typing indicator
-      fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendChatAction`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: chatId, action: 'typing' })
-      });
-      
-      
-      
-      // Send messages sequentially to avoid ETIMEDOUT
-      for (const fb of userFeedbacks) {
         const shop = fb.shop || 'N/A';
         let note = fb.note || fb.message || '';
-        if (note.length > 500) note = note.substring(0, 500) + '... (quá dài, xem trên Dashboard)';
+        if (note.length > 500) note = note.substring(0, 500) + '...';
         
         let caption = `• ID: #${fb.rowNumber}\n`;
         caption += `• Shop: ${shop}\n`;
@@ -437,7 +359,7 @@ app.post('/api/telegram-webhook', async (req, res) => {
       await sendTelegramMessage(chatId, 
         `👋 Xin chào ${firstName}!\n\n` +
         `🔹 /f <nội dung> - Tạo feedback\n` +
-        `🔹 // hoặc /r - Xem feedback\n` +
+        `🔹 // - Xem feedback\n` +
         `🔹 /help - Xem hướng dẫn`
       );
       return res.json({ ok: true });
@@ -451,10 +373,10 @@ app.post('/api/telegram-webhook', async (req, res) => {
         `• \`/f <nội dung>\` - Tạo feedback mới\n` +
         `• Chat riêng: gửi trực tiếp, bot tự tạo\n\n` +
         `*📋 Xem feedback:*\n` +
-        `• \`//\` hoặc \`/r\` - Xem của mình\n` +
-        `• \`// Tên\` hoặc \`/rTên\` - Theo host\n` +
-        `• \`/rall\` - Xem tất cả\n` +
-        `• \`/r<shop>\` - Theo shop\n\n` +
+        `• \`//\` - Xem feedback của mình\n` +
+        `• \`// Tên\` - Xem theo host\n` +
+        `• \`// all\` - Xem tất cả\n` +
+        `• \`// shop\` - Xem theo shop\n\n` +
         `*✅ Xử lý (Reply tin nhắn):*\n` +
         `• \`done\` - Hoàn thành\n` +
         `• \`done <ghi chú>\` - Done + note\n` +
