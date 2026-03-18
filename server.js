@@ -457,79 +457,22 @@ async function sendTelegramMessage(chatId, text, options = {}) {
   }
 }
 
-// Send photo to Telegram
+// Send photo to Telegram (fast: send file_id directly, R2 upload in background)
 async function sendTelegramPhoto(chatId, fileId, caption = '', options = {}, rowNumber = null) {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
-  
-  if (!botToken) {
-    console.error('TELEGRAM_BOT_TOKEN not configured');
-    return;
-  }
+  if (!botToken) { console.error('TELEGRAM_BOT_TOKEN not configured'); return; }
   
   try {
+    // Determine what to send: URL, cached R2, or raw file_id
     let photoToSend = fileId;
-    let needsSheetUpdate = false;
-    
-    // If imageId is already a URL, use it directly
     if (fileId.startsWith('http://') || fileId.startsWith('https://')) {
       photoToSend = fileId;
-      console.log('Using existing URL:', fileId);
-    }
-    // Check cache first
-    else if (imageUrlCache.has(fileId)) {
+    } else if (imageUrlCache.has(fileId)) {
       photoToSend = imageUrlCache.get(fileId);
-      console.log('Using cached R2 URL:', photoToSend);
     }
-    // Otherwise, download from Telegram and upload to R2
-    else {
-      try {
-        const fileResponse = await fetch(`https://api.telegram.org/bot${botToken}/getFile?file_id=${fileId}`);
-        const fileData = await fileResponse.json();
-        
-        if (fileData.ok && fileData.result && fileData.result.file_path) {
-          const filePath = fileData.result.file_path;
-          const fileUrl = `https://api.telegram.org/file/bot${botToken}/${filePath}`;
-          
-          // Download and upload to R2
-          const downloadResponse = await fetch(fileUrl);
-          if (downloadResponse.ok) {
-            const arrayBuffer = await downloadResponse.arrayBuffer();
-            const buffer = Buffer.from(arrayBuffer);
-            
-            // Upload to R2
-            const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
-            const s3Client = new S3Client({
-              region: 'auto',
-              endpoint: `https://${process.env.CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-              credentials: {
-                accessKeyId: process.env.CLOUDFLARE_R2_ACCESS_KEY_ID,
-                secretAccessKey: process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY,
-              },
-            });
-            
-            const fileName = `telegram/${Date.now()}_${filePath.split('/').pop()}`;
-            await s3Client.send(new PutObjectCommand({
-              Bucket: process.env.CLOUDFLARE_R2_BUCKET_NAME,
-              Key: fileName,
-              Body: buffer,
-              ContentType: 'image/jpeg',
-            }));
-            
-            // Use R2 CDN URL
-            photoToSend = `${process.env.CLOUDFLARE_CDN_URL}/${fileName}`;
-            
-            // Cache it
-            imageUrlCache.set(fileId, photoToSend);
-            needsSheetUpdate = true;
-            console.log('Uploaded to R2 and cached:', photoToSend);
-          }
-        }
-      } catch (err) {
-        console.log('Could not download from Telegram, using file_id:', err.message);
-      }
-    }
+    // Otherwise use file_id directly (Telegram handles it natively - FAST)
     
-    // Send photo using CURRENT bot (https module, forced IPv4)
+    // Send photo immediately
     let result;
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
@@ -547,18 +490,57 @@ async function sendTelegramPhoto(chatId, fileId, caption = '', options = {}, row
       }
     }
     
-    // Update Sheet with R2 URL if we uploaded a new image
-    if (needsSheetUpdate && rowNumber && photoToSend.startsWith('http')) {
-      try {
-        await sheetsClient.updateCell(rowNumber, 'N', photoToSend);
-        console.log(`Updated Sheet row ${rowNumber} with R2 URL`);
-      } catch (err) {
-        console.error('Failed to update Sheet:', err.message);
-      }
+    // Upload to R2 in background (don't block response) for uncached file_ids
+    if (!fileId.startsWith('http') && !imageUrlCache.has(fileId)) {
+      uploadToR2InBackground(botToken, fileId, rowNumber).catch(err =>
+        console.error('Background R2 upload failed:', err.message)
+      );
     }
   } catch (error) {
     console.error('Failed to send Telegram photo:', error);
     throw error;
+  }
+}
+
+// Background R2 upload (non-blocking)
+async function uploadToR2InBackground(botToken, fileId, rowNumber) {
+  try {
+    const fileResponse = await fetch(`https://api.telegram.org/bot${botToken}/getFile?file_id=${fileId}`);
+    const fileData = await fileResponse.json();
+    if (!fileData.ok || !fileData.result?.file_path) return;
+    
+    const filePath = fileData.result.file_path;
+    const fileUrl = `https://api.telegram.org/file/bot${botToken}/${filePath}`;
+    const downloadResponse = await fetch(fileUrl);
+    if (!downloadResponse.ok) return;
+    
+    const buffer = Buffer.from(await downloadResponse.arrayBuffer());
+    const s3Client = new S3Client({
+      region: 'auto',
+      endpoint: `https://${process.env.CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+      credentials: {
+        accessKeyId: process.env.CLOUDFLARE_R2_ACCESS_KEY_ID,
+        secretAccessKey: process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY,
+      },
+    });
+    
+    const fileName = `telegram/${Date.now()}_${filePath.split('/').pop()}`;
+    await s3Client.send(new PutObjectCommand({
+      Bucket: process.env.CLOUDFLARE_R2_BUCKET_NAME,
+      Key: fileName,
+      Body: buffer,
+      ContentType: 'image/jpeg',
+    }));
+    
+    const r2Url = `${process.env.CLOUDFLARE_CDN_URL}/${fileName}`;
+    imageUrlCache.set(fileId, r2Url);
+    
+    if (rowNumber) {
+      await sheetsClient.updateCell(rowNumber, 'N', r2Url);
+      console.log(`[R2] Background upload done: row ${rowNumber} → ${r2Url}`);
+    }
+  } catch (err) {
+    console.error('[R2] Background upload error:', err.message);
   }
 }
 
