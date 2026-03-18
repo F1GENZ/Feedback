@@ -202,7 +202,7 @@ app.post('/api/telegram-webhook', async (req, res) => {
         body: JSON.stringify({ chat_id: chatId, action: 'typing' })
       });
       
-      const sendPromises = filtered.map(async (fb) => {
+      for (const fb of filtered) {
         let noteText = fb.note || fb.message || '';
         if (noteText.length > 500) noteText = noteText.substring(0, 500) + '...';
         let caption = `• ID: #${fb.rowNumber}\n• Shop: ${fb.shop || 'N/A'}\n• File:\n${fb.link || 'KHÔNG có file'}`;
@@ -216,8 +216,7 @@ app.post('/api/telegram-webhook', async (req, res) => {
         } catch (err) {
           await sendTelegramMessage(chatId, caption + '\n\n📷 (Không thể tải ảnh)', { disable_web_page_preview: true }).catch(() => {});
         }
-      });
-      await Promise.all(sendPromises);
+      }
       return res.json({ ok: true });
     }
     
@@ -280,45 +279,30 @@ app.post('/api/telegram-webhook', async (req, res) => {
       
       
       
-      // Prepare all messages in parallel (faster)
-      const sendPromises = userFeedbacks.map(async (fb) => {
+      // Send messages sequentially to avoid ETIMEDOUT
+      for (const fb of userFeedbacks) {
         const shop = fb.shop || 'N/A';
         let note = fb.note || fb.message || '';
+        if (note.length > 500) note = note.substring(0, 500) + '... (quá dài, xem trên Dashboard)';
         
-        // Truncate note if too long
-        const MAX_NOTE_LENGTH = 500;
-        if (note.length > MAX_NOTE_LENGTH) {
-          note = note.substring(0, MAX_NOTE_LENGTH) + '... (quá dài, xem trên Dashboard)';
-        }
-        
-        // Build caption/message
         let caption = `• ID: #${fb.rowNumber}\n`;
         caption += `• Shop: ${shop}\n`;
         caption += `• File: ${fb.link || 'KHÔNG có file'}`;
-        if (note) {
-          caption += `\n• Note: ${note}`;
-        }
+        if (note) caption += `\n• Note: ${note}`;
         
         try {
-          // If has imageId, send as photo with caption
           if (fb.imageId) {
             await sendTelegramPhoto(chatId, fb.imageId, caption, { disable_web_page_preview: true }, fb.rowNumber);
           } else {
-            // Otherwise send as text
             await sendTelegramMessage(chatId, caption, { disable_web_page_preview: true });
           }
         } catch (err) {
           console.error('Send error:', err.message);
-          // Fallback to text if photo fails
           if (fb.imageId) {
-            await sendTelegramMessage(chatId, caption + '\n\n📷 (Không thể tải ảnh)', { disable_web_page_preview: true })
-              .catch(e => console.error('Fallback error:', e.message));
+            await sendTelegramMessage(chatId, caption + '\n\n📷 (Không thể tải ảnh)', { disable_web_page_preview: true }).catch(() => {});
           }
         }
-      });
-      
-      // Send all in parallel (much faster)
-      await Promise.all(sendPromises);
+      }
       
       return res.json({ ok: true });
     }
@@ -387,24 +371,16 @@ app.post('/api/telegram-webhook', async (req, res) => {
             if (remainingFeedbacks.length > 0) {
               await sendTelegramMessage(chatId, `📋 Còn ${remainingFeedbacks.length} feedback:`);
               
-              // Send all in parallel (faster)
-              const refreshPromises = remainingFeedbacks.map(async (fb) => {
+              // Send messages sequentially to avoid ETIMEDOUT
+              for (const fb of remainingFeedbacks) {
                 const shopName = fb.shop || 'N/A';
                 let noteText = fb.note || fb.message || '';
+                if (noteText.length > 500) noteText = noteText.substring(0, 500) + '... (quá dài, xem trên Dashboard)';
                 
-                // Truncate note if too long
-                const MAX_NOTE_LENGTH = 500;
-                if (noteText.length > MAX_NOTE_LENGTH) {
-                  noteText = noteText.substring(0, MAX_NOTE_LENGTH) + '... (quá dài, xem trên Dashboard)';
-                }
-                
-                // Build caption/message
                 let caption = `• ID: #${fb.rowNumber}\n`;
                 caption += `• Shop: ${shopName}\n`;
                 caption += `• File: ${fb.link || 'KHÔNG có file'}`;
-                if (noteText) {
-                  caption += `\n• Note: ${noteText}`;
-                }
+                if (noteText) caption += `\n• Note: ${noteText}`;
                 
                 try {
                   if (fb.imageId) {
@@ -415,13 +391,10 @@ app.post('/api/telegram-webhook', async (req, res) => {
                 } catch (err) {
                   console.error('Send error:', err.message);
                   if (fb.imageId) {
-                    await sendTelegramMessage(chatId, caption + '\n\n📷 (Không thể tải ảnh)', { disable_web_page_preview: true })
-                      .catch(e => console.error('Fallback error:', e.message));
+                    await sendTelegramMessage(chatId, caption + '\n\n📷 (Không thể tải ảnh)', { disable_web_page_preview: true }).catch(() => {});
                   }
                 }
-              });
-              
-              await Promise.all(refreshPromises);
+              }
             } else {
               await sendTelegramMessage(chatId, `🎉 Không còn feedback nào!`);
             }
