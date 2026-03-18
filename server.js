@@ -169,13 +169,13 @@ app.post('/api/telegram-webhook', async (req, res) => {
       return res.json({ ok: true });
     }
     
-    // Handle /r commands - Read feedbacks (/r, /rall, /r<name>, /r<shop>)
-    if (text.startsWith('/r') && !text.startsWith('/restart') && text !== '/r@' && !text.startsWith('/reply')) {
+    // Handle /r commands - Read feedbacks (/r, /r all, /r Tên, /r shop)
+    if (text === '/r' || text.startsWith('/r ') || text.startsWith('/r@')) {
       const cmdRaw = text.replace(/@\S+/, '').trim();
-      const cmd = cmdRaw.toLowerCase();
-      const isAll = cmd === '/rall';
-      let searchKeyword = '';
-      if (!isAll && cmdRaw.length > 2) searchKeyword = cmdRaw.substring(2).trim().toLowerCase();
+      const parts = cmdRaw.split(/\s+/);
+      const keyword = parts.length > 1 ? parts.slice(1).join(' ').toLowerCase() : '';
+      const isAll = keyword === 'all';
+      let searchKeyword = isAll ? '' : keyword;
       
       const currentUserHost = TELEGRAM_ID_TO_HOST[userId] || firstName;
       const data = await sheetsClient.getAllData();
