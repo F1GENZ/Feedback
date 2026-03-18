@@ -442,7 +442,6 @@ async function sendTelegramMessage(chatId, text, options = {}) {
 // Send photo to Telegram
 async function sendTelegramPhoto(chatId, fileId, caption = '', options = {}, rowNumber = null) {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
-  const oldBotToken = process.env.TELEGRAM_IMAGE_BOT_TOKEN;
   
   if (!botToken) {
     console.error('TELEGRAM_BOT_TOKEN not configured');
@@ -463,15 +462,15 @@ async function sendTelegramPhoto(chatId, fileId, caption = '', options = {}, row
       photoToSend = imageUrlCache.get(fileId);
       console.log('Using cached R2 URL:', photoToSend);
     }
-    // Otherwise, download from old bot and upload to R2
-    else if (oldBotToken) {
+    // Otherwise, download from Telegram and upload to R2
+    else {
       try {
-        const fileResponse = await fetch(`https://api.telegram.org/bot${oldBotToken}/getFile?file_id=${fileId}`);
+        const fileResponse = await fetch(`https://api.telegram.org/bot${botToken}/getFile?file_id=${fileId}`);
         const fileData = await fileResponse.json();
         
         if (fileData.ok && fileData.result && fileData.result.file_path) {
           const filePath = fileData.result.file_path;
-          const fileUrl = `https://api.telegram.org/file/bot${oldBotToken}/${filePath}`;
+          const fileUrl = `https://api.telegram.org/file/bot${botToken}/${filePath}`;
           
           // Download and upload to R2
           const downloadResponse = await fetch(fileUrl);
@@ -508,7 +507,7 @@ async function sendTelegramPhoto(chatId, fileId, caption = '', options = {}, row
           }
         }
       } catch (err) {
-        console.log('Could not process with old bot, using file_id:', err.message);
+        console.log('Could not download from Telegram, using file_id:', err.message);
       }
     }
     
@@ -859,8 +858,7 @@ app.get('/api/telegram-image', async (req, res) => {
     return res.json({ success: true, url: imageUrlCache.get(fileId) });
   }
   
-  // Use separate token for image proxy (old bot that has access to images)
-  const botToken = process.env.TELEGRAM_IMAGE_BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN;
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
   if (!botToken) {
     return res.json({ success: false, message: 'Telegram bot token not configured' });
   }
