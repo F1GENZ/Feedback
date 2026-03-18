@@ -11,6 +11,9 @@ require('dotenv').config();
 
 const app = express();
 
+// Performance: gzip compression
+try { app.use(require('compression')()); } catch(e) { /* compression not installed */ }
+
 // Middleware
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
@@ -32,6 +35,68 @@ const HOST_TO_TELEGRAM_ID = Object.fromEntries(
 
 // Cache for R2 URLs (to avoid re-uploading same images)
 const imageUrlCache = new Map();
+// Helper: Format Vietnam timezone timestamp
+function formatVNTimestamp(format = 'full') {
+  const now = new Date();
+  const vn = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' }));
+  const d = vn.getDate().toString().padStart(2, '0');
+  const m = (vn.getMonth() + 1).toString().padStart(2, '0');
+  const y = vn.getFullYear();
+  const h = vn.getHours().toString().padStart(2, '0');
+  const min = vn.getMinutes().toString().padStart(2, '0');
+  const s = vn.getSeconds().toString().padStart(2, '0');
+  return format === 'short' ? `${h}:${min} ${d}/${m}/${y}` : `${h}:${min}:${s} ${d}/${m}/${y}`;
+}
+
+// Helper: Parse comments from JSON string
+function parseComments(rawString) {
+  if (!rawString) return [];
+  const trimmed = rawString.trim();
+  if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (e) { return []; }
+  }
+  // Legacy text → wrap as comment
+  return [{ text: rawString, time: 'Note cũ', author: 'System' }];
+}
+
+// Singleton S3 client (reused across all uploads)
+let _s3Client = null;
+function getS3Client() {
+  if (!_s3Client) {
+    _s3Client = new S3Client({
+      region: 'auto',
+      endpoint: `https://${process.env.CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+      credentials: {
+        accessKeyId: process.env.CLOUDFLARE_R2_ACCESS_KEY_ID,
+        secretAccessKey: process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY,
+      },
+    });
+  }
+  return _s3Client;
+}
+
+// In-memory cache for getAllData (reduces Google Sheets API calls)
+let _dataCache = null;
+let _dataCacheTime = 0;
+const DATA_CACHE_TTL = 10000; // 10 seconds
+
+async function getCachedData(forceRefresh = false) {
+  if (!forceRefresh && _dataCache && (Date.now() - _dataCacheTime < DATA_CACHE_TTL)) {
+    return _dataCache;
+  }
+  _dataCache = await sheetsClient.getAllData();
+  _dataCacheTime = Date.now();
+  return _dataCache;
+}
+
+function invalidateDataCache() {
+  _dataCache = null;
+  _dataCacheTime = 0;
+}
+
 
 // ==================== SMART PARSING CONSTANTS ====================
 const VALID_DOMAINS = ['.com', '.vn', '.com.vn', '.myharavan.com', '.mysapo.net', '.net', '.asia', '.org', '.group', '.top', '.online'];
@@ -84,9 +149,7 @@ function parseMessageContent(text, firstName) {
 async function handleCreateFromTelegram(chatId, firstName, text, photoId, userId, chatType) {
   try {
     const parsed = parseMessageContent(text || '', firstName);
-    const now = new Date();
-    const vn = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' }));
-    const ts = `${vn.getHours().toString().padStart(2,'0')}:${vn.getMinutes().toString().padStart(2,'0')}:${vn.getSeconds().toString().padStart(2,'0')} ${vn.getDate().toString().padStart(2,'0')}/${(vn.getMonth()+1).toString().padStart(2,'0')}/${vn.getFullYear()}`;
+    const ts = formatVNTimestamp();
 
     const row = [
       Date.now().toString(), '', parsed.host, parsed.shop, parsed.link,
@@ -94,8 +157,9 @@ async function handleCreateFromTelegram(chatId, firstName, text, photoId, userId
       ts, parsed.message, userId, photoId || '', ''
     ];
     await sheetsClient.appendRow(row);
+    invalidateDataCache();
 
-    const data = await sheetsClient.getAllData();
+    const data = await getCachedData(true);
     const feedbackCount = (data.rows || []).filter(r => r.host === parsed.host && r.stage === 'Feedback').length;
     await sendTelegramMessage(chatId, `✅ ${parsed.host} có ${feedbackCount} feedback`);
 
@@ -148,7 +212,6 @@ app.post('/api/telegram-webhook', async (req, res) => {
     
     // Handle /groupid command - show group chat ID
     if (text === '/groupid') {
-      const chatType = message.chat.type; // 'private', 'group', 'supergroup'
       const chatTitle = message.chat.title || 'N/A';
       
       await sendTelegramMessage(chatId, 
@@ -168,7 +231,7 @@ app.post('/api/telegram-webhook', async (req, res) => {
       const isAll = keyword === 'all';
       
       const currentUserHost = TELEGRAM_ID_TO_HOST[userId] || firstName;
-      const data = await sheetsClient.getAllData();
+      const data = await getCachedData();
       const rows = data.rows || [];
       
       let filtered;
@@ -188,9 +251,15 @@ app.post('/api/telegram-webhook', async (req, res) => {
         filtered = rows.filter(r => r.host === currentUserHost && r.stage === 'Feedback');
       }
       
+      const MAX_ITEMS = 20;
       if (filtered.length === 0) {
         await sendTelegramMessage(chatId, '🎉🎉 Hết Feedback! 🎉🎉');
         return res.json({ ok: true });
+      }
+      
+      if (filtered.length > MAX_ITEMS) {
+        await sendTelegramMessage(chatId, `📊 Hiện ${MAX_ITEMS}/${filtered.length} feedback (mới nhất)`);
+        filtered = filtered.slice(-MAX_ITEMS);
       }
       
       telegramRequest(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendChatAction`, { chat_id: chatId, action: 'typing' });
@@ -507,17 +576,8 @@ async function uploadToR2InBackground(botToken, fileId, rowNumber) {
     if (!downloadResponse.ok) return;
     
     const buffer = Buffer.from(await downloadResponse.arrayBuffer());
-    const s3Client = new S3Client({
-      region: 'auto',
-      endpoint: `https://${process.env.CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-      credentials: {
-        accessKeyId: process.env.CLOUDFLARE_R2_ACCESS_KEY_ID,
-        secretAccessKey: process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY,
-      },
-    });
-    
     const fileName = `telegram/${Date.now()}_${filePath.split('/').pop()}`;
-    await s3Client.send(new PutObjectCommand({
+    await getS3Client().send(new PutObjectCommand({
       Bucket: process.env.CLOUDFLARE_R2_BUCKET_NAME,
       Key: fileName,
       Body: buffer,
@@ -565,20 +625,12 @@ async function uploadTelegramPhotoToR2(fileId) {
     const buffer = Buffer.from(arrayBuffer);
     
     // Step 3: Upload to R2
-    const s3Client = new S3Client({
-      region: 'auto',
-      endpoint: `https://${process.env.CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-      credentials: {
-        accessKeyId: process.env.CLOUDFLARE_R2_ACCESS_KEY_ID,
-        secretAccessKey: process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY
-      }
-    });
     
     // Generate unique filename
     const ext = filePath.split('.').pop() || 'jpg';
     const filename = `telegram/${Date.now()}-${crypto.randomUUID()}.${ext}`;
     
-    await s3Client.send(new PutObjectCommand({
+    await getS3Client().send(new PutObjectCommand({
       Bucket: process.env.CLOUDFLARE_R2_BUCKET_NAME.trim(),
       Key: filename,
       Body: buffer,
@@ -604,8 +656,7 @@ async function notifyHostFeedbackCount(host) {
   console.log(`[Notification] Checking feedback count for host: ${host}`);
   
   try {
-    // Get current feedback count for this host
-    const data = await sheetsClient.getAllData();
+    const data = await getCachedData();
     const rows = data.rows || [];
     const feedbackCount = rows.filter(r => r.host === host && r.stage === 'Feedback').length;
     
@@ -648,15 +699,7 @@ async function addCommentToFeedback(rowNumber, commentText) {
     }
   }
 
-  // Create new comment with VN Timezone
-  const now = new Date();
-  const vnTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' }));
-  const d = vnTime.getDate().toString().padStart(2, '0');
-  const m = (vnTime.getMonth() + 1).toString().padStart(2, '0');
-  const y = vnTime.getFullYear();
-  const h = vnTime.getHours().toString().padStart(2, '0');
-  const min = vnTime.getMinutes().toString().padStart(2, '0');
-  const timestamp = `${h}:${min} ${d}/${m}/${y}`;
+  const timestamp = formatVNTimestamp('short');
   
   comments.push({
     text: commentText,
@@ -872,17 +915,9 @@ app.get('/api/telegram-image', async (req, res) => {
         const buffer = Buffer.from(arrayBuffer);
         
         // Upload to R2
-        const s3Client = new S3Client({
-          region: 'auto',
-          endpoint: `https://${process.env.CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-          credentials: {
-            accessKeyId: process.env.CLOUDFLARE_R2_ACCESS_KEY_ID,
-            secretAccessKey: process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY,
-          },
-        });
         
         const fileName = `telegram/${Date.now()}_${filePath.split('/').pop()}`;
-        await s3Client.send(new PutObjectCommand({
+        await getS3Client().send(new PutObjectCommand({
           Bucket: process.env.CLOUDFLARE_R2_BUCKET_NAME,
           Key: fileName,
           Body: buffer,
@@ -921,7 +956,7 @@ app.get('/api/telegram-image', async (req, res) => {
 // Helper Functions
 
 async function getDashboardData() {
-  const data = await sheetsClient.getAllData();
+  const data = await getCachedData();
   const rows = data.rows || [];
 
   // Calculate stats
@@ -983,16 +1018,7 @@ async function getHistory() {
 async function createFeedback(feedback) {
   if (!feedback) throw new Error('No feedback data');
   
-  // Use Vietnam timezone
-  const now = new Date();
-  const vnTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' }));
-  const d = vnTime.getDate().toString().padStart(2, '0');
-  const m = (vnTime.getMonth() + 1).toString().padStart(2, '0');
-  const y = vnTime.getFullYear();
-  const h = vnTime.getHours().toString().padStart(2, '0');
-  const min = vnTime.getMinutes().toString().padStart(2, '0');
-  const s = vnTime.getSeconds().toString().padStart(2, '0');
-  const timestamp = `${h}:${min}:${s} ${d}/${m}/${y}`;
+  const timestamp = formatVNTimestamp();
   
   // Prepare row data (Columns A-O)
   // A: ID, B: Deadline, C: Host, D: Shop, E: Link, F: Stage, G: Tags, H: Dev_note, I: Image_note, J: Note, K: Time, L: Message, M: MessageID, N: ImageID, O: UpdatedAt
@@ -1015,6 +1041,7 @@ async function createFeedback(feedback) {
   ];
 
   const success = await sheetsClient.appendRow(row);
+  invalidateDataCache();
   if (success) {
     // Notify host if stage is Feedback
     if ((feedback.stage || 'Feedback') === 'Feedback' && feedback.host) {
@@ -1029,36 +1056,6 @@ async function createFeedback(feedback) {
 
 async function updateFeedback(rowNumber, updates) {
   if (!rowNumber) throw new Error('Missing rowNumber');
-  
-  // We need to fetch current data first to merge updates properly?
-  // Or we modify sheetsClient to update specific cells?
-  // Code.gs gets existing row, modifies it, and overwrites.
-  
-  // Optimized approach: 
-  // Read specific row using getAllData is inefficient if we just need one row.
-  // But getAllData reads everything anyway.
-  
-  // Better: read just that row from sheet?
-  // Let's implement reading a single row in sheetsClient if needed, or just iterate `getAllData` since it's cached in memory usually?
-  // No, on serverless, no cache.
-  // Actually, updateRow expects full row array.
-  // Let's implement `getRow` in sheetsClient. NO wait, I can just use getValues for that specific range.
-  
-  // Since sheetsClient doesn't have getRow, I'll use getAllData logic inside here or add getRow to client.
-  // Adding getRow to client is better. But for now I will cheat:
-  // Since our `updates` object only has specific fields, we need to know the OLD values to preserve them.
-  // BUT Code.gs `updateFeedback` logic reads the row first.
-  
-  // I will add `getRow(rowNumber)` to `sheetsClient` now. Or inline it.
-  // Let's assume I'll add it.
-  
-  // For now, let's just implement `getRow` logic here using sheetsClient instance if I can access sheets object? No it's encapsulated.
-  // I should update sheetsClient.js to include getRow.
-  
-  // Wait, I already wrote sheetsClient.js without getRow. I should add it.
-  
-  // Re-reading sheetsClient.js content... it doesn't have getRow.
-  // I'll assume for this file that `sheetsClient.getRow(rowNumber)` exists and I'll update sheetsClient.js in next step.
   
   const currentRowRaw = await sheetsClient.getRow(rowNumber); 
   // Expecting array of values A-N
@@ -1085,18 +1082,10 @@ async function updateFeedback(rowNumber, updates) {
   if (updates.message !== undefined) newRow[11] = updates.message;
   // Keep Time (10) same
   
-  // Update the updated_at timestamp (column O, index 14)
-  const now = new Date();
-  const vnTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' }));
-  const d = vnTime.getDate().toString().padStart(2, '0');
-  const m = (vnTime.getMonth() + 1).toString().padStart(2, '0');
-  const y = vnTime.getFullYear();
-  const h = vnTime.getHours().toString().padStart(2, '0');
-  const min = vnTime.getMinutes().toString().padStart(2, '0');
-  const s = vnTime.getSeconds().toString().padStart(2, '0');
-  newRow[14] = `${h}:${min}:${s} ${d}/${m}/${y}`;
+  newRow[14] = formatVNTimestamp();
   
   await sheetsClient.updateRow(rowNumber, newRow);
+  invalidateDataCache();
   
   // Notify host if stage changed to Feedback
   if (updates.stage === 'Feedback' && newRow[2]) {
@@ -1111,19 +1100,11 @@ async function updateStage(rowNumber, newStage) {
   const currentRow = await sheetsClient.getRow(rowNumber);
   const host = currentRow[2]; // Column C = Host
   
-  // Update Column F (Stage) and Column O (UpdatedAt)
-  const now = new Date();
-  const vnTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' }));
-  const d = vnTime.getDate().toString().padStart(2, '0');
-  const m = (vnTime.getMonth() + 1).toString().padStart(2, '0');
-  const y = vnTime.getFullYear();
-  const h = vnTime.getHours().toString().padStart(2, '0');
-  const min = vnTime.getMinutes().toString().padStart(2, '0');
-  const s = vnTime.getSeconds().toString().padStart(2, '0');
-  const timestamp = `${h}:${min}:${s} ${d}/${m}/${y}`;
+  const timestamp = formatVNTimestamp();
   
   await sheetsClient.updateCell(rowNumber, 'F', newStage);
   await sheetsClient.updateCell(rowNumber, 'O', timestamp);
+  invalidateDataCache();
   
   // Notify host if stage changed to Feedback
   if (newStage === 'Feedback' && host) {
@@ -1143,6 +1124,7 @@ async function deleteFeedback(rowNumber) {
   if (!rowNumber) throw new Error('Missing rowNumber');
   
   await sheetsClient.deleteRow(rowNumber);
+  invalidateDataCache();
   // await sheetsClient.logHistory('DELETE', `Xóa row ${rowNumber}`); // DISABLED
   return { success: true, message: 'Đã xóa feedback!' };
 }
@@ -1155,15 +1137,7 @@ async function bulkUpdateStage(rowNumbers, newStage) {
   }
   if (!newStage) throw new Error('Missing newStage');
 
-  const now = new Date();
-  const vnTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' }));
-  const d = vnTime.getDate().toString().padStart(2, '0');
-  const m = (vnTime.getMonth() + 1).toString().padStart(2, '0');
-  const y = vnTime.getFullYear();
-  const h = vnTime.getHours().toString().padStart(2, '0');
-  const min = vnTime.getMinutes().toString().padStart(2, '0');
-  const s = vnTime.getSeconds().toString().padStart(2, '0');
-  const timestamp = `${h}:${min}:${s} ${d}/${m}/${y}`;
+  const timestamp = formatVNTimestamp();
 
   for (const rowNumber of rowNumbers) {
     await sheetsClient.updateCell(rowNumber, 'F', newStage);
@@ -1217,21 +1191,7 @@ async function addComment(rowNumber, commentText) {
     }
   }
 
-  // Create new comment with VN Timezone
-  const now = new Date();
-  const options = { timeZone: 'Asia/Ho_Chi_Minh', hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit', year: 'numeric', hour12: false };
-  // Format: "22:30 09/01/2026"
-  // toLocaleString returns "22:30:00 09/01/2026" or similar depending on locale, let's normalize
-  const timeStr = now.toLocaleString('vi-VN', options).replace(/:\d{2} /, ' '); 
-  // Simplified manual formatting to ensure consistency if needed, but locale vi-VN is usually good.
-  // Actually, let's stick to the previous format "HH:mm dd/MM/yyyy"
-  const vnTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' }));
-  const d = vnTime.getDate().toString().padStart(2, '0');
-  const m = (vnTime.getMonth() + 1).toString().padStart(2, '0');
-  const y = vnTime.getFullYear();
-  const h = vnTime.getHours().toString().padStart(2, '0');
-  const min = vnTime.getMinutes().toString().padStart(2, '0');
-  const timestamp = `${h}:${min} ${d}/${m}/${y}`;
+  const timestamp = formatVNTimestamp('short');
   
   comments.push({
     text: commentText.trim(),
@@ -1250,23 +1210,7 @@ async function getComments(rowNumber) {
   const currentRow = await sheetsClient.getRow(rowNumber);
   let comments = [];
   
-  const currentContent = currentRow[7] || '';
-  if (currentContent) {
-    if (currentContent.trim().startsWith('[') && currentContent.trim().endsWith(']')) {
-      try {
-        comments = JSON.parse(currentContent);
-        if (!Array.isArray(comments)) comments = [];
-      } catch (e) {
-        comments = [];
-      }
-    } else {
-      comments.push({
-        text: currentContent,
-        time: 'Note cũ',
-        author: 'System'
-      });
-    }
-  }
+  comments = parseComments(currentRow[7] || '');
 
   return { success: true, comments };
 }
@@ -1276,19 +1220,7 @@ async function deleteComment(rowNumber, commentIndex) {
   if (commentIndex === undefined || commentIndex === null) throw new Error('Missing commentIndex');
 
   const currentRow = await sheetsClient.getRow(rowNumber);
-  let comments = [];
-  
-  const currentContent = currentRow[7] || '';
-  if (currentContent) {
-    if (currentContent.trim().startsWith('[') && currentContent.trim().endsWith(']')) {
-      try {
-        comments = JSON.parse(currentContent);
-        if (!Array.isArray(comments)) comments = [];
-      } catch (e) {
-        comments = [];
-      }
-    }
-  }
+  let comments = parseComments(currentRow[7] || '');
 
   if (commentIndex >= 0 && commentIndex < comments.length) {
     comments.splice(commentIndex, 1);
