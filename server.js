@@ -107,9 +107,9 @@ async function handleCreateFromTelegram(chatId, firstName, text, photoId, userId
     const feedbackCount = (data.rows || []).filter(r => r.host === parsed.host && r.stage === 'Feedback').length;
     await sendTelegramMessage(chatId, `✅ ${parsed.host} có ${feedbackCount} feedback`);
 
-    // Notify group if creating from private chat
+    // Always notify group
     const groupChatId = process.env.TELEGRAM_GROUP_CHAT_ID;
-    if (groupChatId && String(chatId) !== String(groupChatId)) {
+    if (groupChatId) {
       await sendTelegramMessage(groupChatId, `📬 ${parsed.host} có ${feedbackCount} feedback`);
     }
   } catch (error) {
