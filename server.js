@@ -88,18 +88,10 @@ async function handleCreateFromTelegram(chatId, firstName, text, photoId, userId
     const vn = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' }));
     const ts = `${vn.getHours().toString().padStart(2,'0')}:${vn.getMinutes().toString().padStart(2,'0')}:${vn.getSeconds().toString().padStart(2,'0')} ${vn.getDate().toString().padStart(2,'0')}/${(vn.getMonth()+1).toString().padStart(2,'0')}/${vn.getFullYear()}`;
 
-    let imageId = photoId || '';
-    if (photoId) {
-      try {
-        const r2Url = await uploadTelegramPhotoToR2(photoId);
-        if (r2Url && !r2Url.startsWith('Error')) imageId = r2Url;
-      } catch (e) { console.error('Photo upload failed:', e.message); }
-    }
-
     const row = [
       Date.now().toString(), '', parsed.host, parsed.shop, parsed.link,
       'Feedback', parsed.tags, '', '', parsed.note,
-      ts, parsed.message, userId, imageId, ''
+      ts, parsed.message, userId, photoId || '', ''
     ];
     await sheetsClient.appendRow(row);
 
