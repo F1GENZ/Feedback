@@ -29,6 +29,91 @@ const HOST_TO_TELEGRAM_ID = Object.fromEntries(
 // Cache for R2 URLs (to avoid re-uploading same images)
 const imageUrlCache = new Map();
 
+// ==================== SMART PARSING CONSTANTS ====================
+const VALID_DOMAINS = ['.com', '.vn', '.com.vn', '.myharavan.com', '.mysapo.net', '.net', '.asia', '.org', '.group', '.top', '.online'];
+const LINK_FEEDBACK_FORMATS = ['docs.google.com', 'drive.google.com', 'onedrive.live.com', 'figma.com', 'canva.com', 'trello.com'];
+const TAGS_LIST = ['hrv', 'haravan', 'gap', 'note', 'baogia', 'sapo'];
+const HOST_ALIAS_MAP = {
+  'quoc': 'Quốc', 'quốc': 'Quốc',
+  'taiz': 'Taiz', 'tai': 'Taiz', 'tài': 'Taiz',
+  'lam': 'Lâm', 'lâm': 'Lâm',
+  'nghia': 'Nghĩa', 'nghĩa': 'Nghĩa',
+  'tuan': 'Tuan', 'tuấn': 'Tuan'
+};
+
+function parseMessageContent(text, firstName) {
+  const message = text || '';
+  const cleaned = message.replace(/[^\p{L}\p{N}\s]/gu, ' ').trim();
+  const words = message.split(/\s+/);
+  const HOSTS = Object.values(TELEGRAM_ID_TO_HOST);
+
+  // Shop: first URL with valid domain that's NOT a feedback link
+  const shopDomains = words.filter(w =>
+    !LINK_FEEDBACK_FORMATS.some(f => w.includes(f)) && VALID_DOMAINS.some(d => w.includes(d))
+  ).map(u => (u.match(/https?:\/\/([^\/]+)/)?.[1] || u.split('/')[0]).replace(/^www\./, '').trim());
+  const shop = shopDomains[0] || '';
+
+  // Link: first URL matching feedback formats
+  const allUrls = message.match(/https?:\/\/\S+/g) || [];
+  const link = allUrls.find(u => LINK_FEEDBACK_FORMATS.some(f => u.includes(f))) || '';
+
+  // Host: from message keywords or fallback to firstName
+  let hostMatch = cleaned.split(/\s+/).filter(w => HOSTS.some(k => k.toLowerCase() === w.toLowerCase()));
+  if (hostMatch.length === 0) hostMatch = [firstName.trim()];
+  hostMatch = hostMatch.map(h => HOSTS.find(k => k.toLowerCase() === h.toLowerCase()) || h);
+  const host = [...new Set(hostMatch)].join(';');
+
+  // Tags
+  const tags = [...new Set(cleaned.split(/[\s,]+/).filter(w => TAGS_LIST.includes(w.toLowerCase())).map(t => t.toLowerCase()))].join(', ');
+
+  // Note: remaining text after removing shop URLs, link, host, tags
+  let content = message;
+  words.filter(u => VALID_DOMAINS.some(d => u.includes(d))).forEach(u => { content = content.replace(u, '').trim(); });
+  if (link) content = content.replace(link, '').trim();
+  hostMatch.forEach(h => { content = content.replace(new RegExp(`\\b${h}\\b`, 'gi'), '').trim(); });
+  cleaned.split(/[\s,]+/).filter(w => TAGS_LIST.includes(w.toLowerCase())).forEach(t => { content = content.replace(new RegExp(`\\b${t}\\b`, 'gi'), '').trim(); });
+  content = content.replace(/[.,;]{2,}/g, ' ').replace(/\s+/g, ' ').trim();
+
+  return { shop, link, host, tags, note: content, message };
+}
+
+async function handleCreateFromTelegram(chatId, firstName, text, photoId, userId, chatType) {
+  try {
+    const parsed = parseMessageContent(text || '', firstName);
+    const now = new Date();
+    const vn = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' }));
+    const ts = `${vn.getHours().toString().padStart(2,'0')}:${vn.getMinutes().toString().padStart(2,'0')}:${vn.getSeconds().toString().padStart(2,'0')} ${vn.getDate().toString().padStart(2,'0')}/${(vn.getMonth()+1).toString().padStart(2,'0')}/${vn.getFullYear()}`;
+
+    let imageId = photoId || '';
+    if (photoId) {
+      try {
+        const r2Url = await uploadTelegramPhotoToR2(photoId);
+        if (r2Url && !r2Url.startsWith('Error')) imageId = r2Url;
+      } catch (e) { console.error('Photo upload failed:', e.message); }
+    }
+
+    const row = [
+      Date.now().toString(), '', parsed.host, parsed.shop, parsed.link,
+      'Feedback', parsed.tags, '', '', parsed.note,
+      ts, parsed.message, userId, imageId, ''
+    ];
+    await sheetsClient.appendRow(row);
+
+    const data = await sheetsClient.getAllData();
+    const feedbackCount = (data.rows || []).filter(r => r.host === parsed.host && r.stage === 'Feedback').length;
+    await sendTelegramMessage(chatId, `✅ ${parsed.host} có ${feedbackCount} feedback`);
+
+    // Notify group if creating from private chat
+    const groupChatId = process.env.TELEGRAM_GROUP_CHAT_ID;
+    if (groupChatId && String(chatId) !== String(groupChatId)) {
+      await sendTelegramMessage(groupChatId, `📬 ${parsed.host} có ${feedbackCount} feedback`);
+    }
+  } catch (error) {
+    console.error('Create from Telegram error:', error);
+    await sendTelegramMessage(chatId, `❌ Lỗi: ${error.message}`);
+  }
+}
+
 // ==================== TELEGRAM BOT WEBHOOK ====================
 app.post('/api/telegram-webhook', async (req, res) => {
   try {
@@ -42,9 +127,16 @@ app.post('/api/telegram-webhook', async (req, res) => {
     const message = update.message;
     const chatId = message.chat.id;
     const userId = message.from.id.toString();
-    const text = (message.text || '').trim();
+    const text = (message.text || message.caption || '').trim();
     const username = message.from.username || '';
     const firstName = message.from.first_name || 'User';
+    const chatType = message.chat.type;
+    
+    // Extract photo if present
+    let photoId = '';
+    if (message.photo && message.photo.length > 0) {
+      photoId = message.photo[message.photo.length - 1].file_id;
+    }
     
     // Handle /myid command - show user's Telegram ID
     if (text === '/myid') {
@@ -71,6 +163,61 @@ app.post('/api/telegram-webhook', async (req, res) => {
         `${chatType !== 'private' ? '✅ Đây là Group ID, copy vào .env!' : '⚠️ Đây là chat riêng, không phải group'}`,
         { parse_mode: 'Markdown' }
       );
+      return res.json({ ok: true });
+    }
+    
+    // Handle /r commands - Read feedbacks (/r, /rall, /r<name>, /r<shop>)
+    if (text.startsWith('/r') && !text.startsWith('/restart') && text !== '/r@' && !text.startsWith('/reply')) {
+      const cmdRaw = text.replace(/@\S+/, '').trim();
+      const cmd = cmdRaw.toLowerCase();
+      const isAll = cmd === '/rall';
+      let searchKeyword = '';
+      if (!isAll && cmdRaw.length > 2) searchKeyword = cmdRaw.substring(2).trim().toLowerCase();
+      
+      const currentUserHost = TELEGRAM_ID_TO_HOST[userId] || firstName;
+      const data = await sheetsClient.getAllData();
+      const rows = data.rows || [];
+      
+      let filtered;
+      if (isAll) {
+        filtered = rows.filter(r => r.stage === 'Feedback');
+      } else if (searchKeyword) {
+        const matchedHost = HOST_ALIAS_MAP[searchKeyword];
+        if (matchedHost) {
+          filtered = rows.filter(r => r.host === matchedHost && r.stage === 'Feedback');
+        } else {
+          filtered = rows.filter(r => r.stage === 'Feedback' && r.shop && r.shop.toLowerCase().includes(searchKeyword));
+        }
+      } else {
+        filtered = rows.filter(r => r.host === currentUserHost && r.stage === 'Feedback');
+      }
+      
+      if (filtered.length === 0) {
+        await sendTelegramMessage(chatId, '🎉🎉 Hết Feedback! 🎉🎉');
+        return res.json({ ok: true });
+      }
+      
+      await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendChatAction`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, action: 'typing' })
+      });
+      
+      const sendPromises = filtered.map(async (fb) => {
+        let noteText = fb.note || fb.message || '';
+        if (noteText.length > 500) noteText = noteText.substring(0, 500) + '...';
+        let caption = `• ID: #${fb.rowNumber}\n• Shop: ${fb.shop || 'N/A'}\n• File:\n${fb.link || 'KHÔNG có file'}`;
+        if (noteText) caption += `\n• Note: ${noteText}`;
+        try {
+          if (fb.imageId && !fb.imageId.startsWith('http')) {
+            await sendTelegramPhoto(chatId, fb.imageId, caption, { disable_web_page_preview: true }, fb.rowNumber);
+          } else {
+            await sendTelegramMessage(chatId, caption, { disable_web_page_preview: true });
+          }
+        } catch (err) {
+          await sendTelegramMessage(chatId, caption + '\n\n📷 (Không thể tải ảnh)', { disable_web_page_preview: true }).catch(() => {});
+        }
+      });
+      await Promise.all(sendPromises);
       return res.json({ ok: true });
     }
     
@@ -278,6 +425,14 @@ app.post('/api/telegram-webhook', async (req, res) => {
             } else {
               await sendTelegramMessage(chatId, `🎉 Không còn feedback nào!`);
             }
+          } else if (lowerText === 'del' || lowerText.startsWith('del ')) {
+            // Delete feedback (set Stage = Deleted)
+            const delNow = new Date();
+            const delVn = new Date(delNow.toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' }));
+            const delTs = `${delVn.getHours().toString().padStart(2,'0')}:${delVn.getMinutes().toString().padStart(2,'0')}:${delVn.getSeconds().toString().padStart(2,'0')} ${delVn.getDate().toString().padStart(2,'0')}/${(delVn.getMonth()+1).toString().padStart(2,'0')}/${delVn.getFullYear()}`;
+            await sheetsClient.updateCell(rowNumber, 'F', 'Deleted');
+            await sheetsClient.updateCell(rowNumber, 'O', delTs);
+            await sendTelegramMessage(chatId, `🗑️ Đã xóa ID #${rowNumber}`);
           } else {
             // Any other reply → add as comment
             let commentText = `[Telegram] ${firstName}: ${replyText}`;
@@ -305,8 +460,9 @@ app.post('/api/telegram-webhook', async (req, res) => {
     if (text === '/start') {
       await sendTelegramMessage(chatId, 
         `👋 Xin chào ${firstName}!\n\n` +
-        `🔹 Gõ // để xem feedback của bạn\n` +
-        `🔹 Gõ /help để xem hướng dẫn`
+        `🔹 /f <nội dung> - Tạo feedback\n` +
+        `🔹 // hoặc /r - Xem feedback\n` +
+        `🔹 /help - Xem hướng dẫn`
       );
       return res.json({ ok: true });
     }
@@ -315,19 +471,39 @@ app.post('/api/telegram-webhook', async (req, res) => {
     if (text === '/help') {
       await sendTelegramMessage(chatId,
         `📚 *Hướng dẫn sử dụng Bot*\n\n` +
+        `*🆕 Tạo feedback:*\n` +
+        `• \`/f <nội dung>\` - Tạo feedback mới\n` +
+        `• Chat riêng: gửi trực tiếp, bot tự tạo\n\n` +
         `*📋 Xem feedback:*\n` +
-        `• \`//\` - Xem feedback\n` +
-        `• \`// Tên\` - Xem feedback của người khác\n\n` +
-        `*✅ Xử lý feedback:*\n` +
-        `• Reply tin nhắn feedback với \`Done\` - Đánh dấu hoàn thành\n` +
-        `• Reply với text/ảnh khác - Thêm comment\n\n` +
-        `*🔧 Lệnh khác:*\n` +
-        `• \`/myid\` - Xem User ID\n` +
-        `• \`/groupid\` - Xem Group ID\n` +
-        `• \`/start\` - Bắt đầu\n` +
-        `• \`/help\` - Xem hướng dẫn`,
+        `• \`//\` hoặc \`/r\` - Xem của mình\n` +
+        `• \`// Tên\` hoặc \`/rTên\` - Theo host\n` +
+        `• \`/rall\` - Xem tất cả\n` +
+        `• \`/r<shop>\` - Theo shop\n\n` +
+        `*✅ Xử lý (Reply tin nhắn):*\n` +
+        `• \`done\` - Hoàn thành\n` +
+        `• \`done <ghi chú>\` - Done + note\n` +
+        `• \`del\` - Xóa feedback\n` +
+        `• text/ảnh khác - Thêm comment\n\n` +
+        `*🔧 Khác:* \`/myid\` \`/groupid\``,
         { parse_mode: 'Markdown' }
       );
+      return res.json({ ok: true });
+    }
+    
+    // Handle /f command - Create feedback (group + private)
+    if (text.startsWith('/f ') || text.startsWith('/f@')) {
+      const createText = text.replace(/^\/f(@\S+)?\s*/, '').trim();
+      if (!createText && !photoId) {
+        await sendTelegramMessage(chatId, '⚠️ Cần nội dung.\nVD: `/f neymarsport.com fix lỗi`', { parse_mode: 'Markdown' });
+        return res.json({ ok: true });
+      }
+      await handleCreateFromTelegram(chatId, firstName, createText, photoId, userId, chatType);
+      return res.json({ ok: true });
+    }
+    
+    // Direct message in PRIVATE chat → auto create feedback
+    if (chatType === 'private' && (text || photoId)) {
+      await handleCreateFromTelegram(chatId, firstName, text, photoId, userId, chatType);
       return res.json({ ok: true });
     }
     
