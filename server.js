@@ -490,26 +490,30 @@ app.post('/api/telegram-webhook', async (req, res) => {
   }
 });
 
-// Send message to Telegram
+// Send message to Telegram (with retry)
 async function sendTelegramMessage(chatId, text, options = {}) {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
-  if (!botToken) {
-    console.error('TELEGRAM_BOT_TOKEN not configured');
-    return;
-  }
+  if (!botToken) { console.error('TELEGRAM_BOT_TOKEN not configured'); return; }
   
-  try {
-    await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: text,
-        ...options
-      })
-    });
-  } catch (error) {
-    console.error('Failed to send Telegram message:', error);
+  const MAX_RETRIES = 3;
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, text: text, ...options }),
+        signal: AbortSignal.timeout(10000)
+      });
+      return response;
+    } catch (error) {
+      const ips = error.cause?.errors?.map(e => e.address + ':' + e.port).join(', ') || 'unknown';
+      console.error(`[Telegram] sendMessage attempt ${attempt}/${MAX_RETRIES} FAILED | IPs tried: ${ips} | ${error.cause?.code || error.message}`);
+      if (attempt < MAX_RETRIES) {
+        await new Promise(r => setTimeout(r, 1000 * attempt));
+      } else {
+        console.error(`[Telegram] GAVE UP after ${MAX_RETRIES} attempts for chat ${chatId}`);
+      }
+    }
   }
 }
 
@@ -586,21 +590,25 @@ async function sendTelegramPhoto(chatId, fileId, caption = '', options = {}, row
       }
     }
     
-    // Send photo using CURRENT bot
-    const response = await fetch(`https://api.telegram.org/bot${botToken}/sendPhoto`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        photo: photoToSend,
-        caption: caption,
-        ...options
-      })
-    });
-    
-    const result = await response.json();
-    if (!result.ok) {
-      throw new Error(result.description || 'Failed to send photo');
+    // Send photo using CURRENT bot (with retry)
+    let result;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const response = await fetch(`https://api.telegram.org/bot${botToken}/sendPhoto`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: chatId, photo: photoToSend, caption: caption, ...options }),
+          signal: AbortSignal.timeout(15000)
+        });
+        result = await response.json();
+        if (result.ok) break;
+        throw new Error(result.description || 'Failed to send photo');
+      } catch (err) {
+        const ips = err.cause?.errors?.map(e => e.address + ':' + e.port).join(', ') || '';
+        console.error(`[Telegram] sendPhoto attempt ${attempt}/3 FAILED | ${ips} | ${err.cause?.code || err.message}`);
+        if (attempt < 3) await new Promise(r => setTimeout(r, 1000 * attempt));
+        else throw err;
+      }
     }
     
     // Update Sheet with R2 URL if we uploaded a new image
