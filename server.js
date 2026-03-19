@@ -135,10 +135,23 @@ function parseMessageContent(text, firstName) {
   // Tags
   const tags = [...new Set(cleaned.split(/[\s,]+/).filter(w => TAGS_LIST.includes(w.toLowerCase())).map(t => t.toLowerCase()))].join(', ');
 
-  // Note: remaining text after removing shop URLs, link, host, tags
+  // Note: remaining text after removing bare domain URLs, host, tags
+  // Keep URLs that have path or query; remove bare domains only
   let content = message;
-  words.filter(u => VALID_DOMAINS.some(d => u.includes(d))).forEach(u => { content = content.replace(u, '').trim(); });
-  if (link) content = content.replace(link, '').trim();
+  words.filter(u => VALID_DOMAINS.some(d => u.includes(d))).forEach(u => {
+    try {
+      const urlStr = u.startsWith('http') ? u : 'https://' + u;
+      const urlObj = new URL(urlStr);
+      const hasPath = urlObj.pathname !== '/' && urlObj.pathname !== '';
+      const hasQuery = urlObj.search !== '';
+      if (!hasPath && !hasQuery) {
+        content = content.replace(u, '').trim();
+      }
+    } catch (e) {
+      // URL parsing failed → remove it (likely just a bare domain)
+      content = content.replace(u, '').trim();
+    }
+  });
   hostMatch.forEach(h => { content = content.replace(new RegExp(`\\b${h}\\b`, 'gi'), '').trim(); });
   cleaned.split(/[\s,]+/).filter(w => TAGS_LIST.includes(w.toLowerCase())).forEach(t => { content = content.replace(new RegExp(`\\b${t}\\b`, 'gi'), '').trim(); });
   content = content.replace(/[.,;]{2,}/g, ' ').replace(/\s+/g, ' ').trim();
