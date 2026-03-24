@@ -23,12 +23,12 @@ jobs:
         run: |
           ssh -o StrictHostKeyChecking=no ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} << 'EOF'
             cd ${{ secrets.APP_DIR }}
+            git fetch origin main
             git reset --hard origin/main
-            git pull origin main
 
-            rm -rf node_modules 
-            npm install
+            npm ci --production --prefer-offline 2>/dev/null || npm install --production
 
-            pm2 restart feedback || pm2 start server.js --name feedback --env production
+            pm2 reload feedback || pm2 start server.js --name feedback --node-args="--dns-result-order=ipv4first"
             pm2 save
+            echo "✅ Deploy complete: $(date)"
           EOF

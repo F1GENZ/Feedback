@@ -1,24 +1,739 @@
+const dns = require('dns');
+dns.setDefaultResultOrder('ipv4first');
+const https = require('https');
+
 const express = require('express');
 const cors = require('cors');
 const sheetsClient = require('./sheetsClient');
 const crypto = require('crypto');
+const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 require('dotenv').config();
 
 const app = express();
+
+// Performance: gzip compression
+try { app.use(require('compression')()); } catch(e) { /* compression not installed */ }
 
 // Middleware
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
+// Telegram User ID to Host mapping (ID is more reliable than username)
+// To get your ID: send /myid to the bot
+const TELEGRAM_ID_TO_HOST = {
+  '814408956': 'Quốc',
+  '852487488': 'Taiz',
+  '642649821': 'Lâm',
+  '801593125': 'Nghĩa',  // Note: Tuan và Nghĩa có cùng ID
+  // '801593125': 'Tuan', // Tuan có cùng ID với Nghĩa - cần xác nhận lại
+};
+
+// Reverse mapping for notifications
+const HOST_TO_TELEGRAM_ID = Object.fromEntries(
+  Object.entries(TELEGRAM_ID_TO_HOST).map(([id, host]) => [host, id])
+);
+
+// Cache for R2 URLs (to avoid re-uploading same images)
+const imageUrlCache = new Map();
+// Helper: Format Vietnam timezone timestamp
+function formatVNTimestamp(format = 'full') {
+  const now = new Date();
+  const vn = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' }));
+  const d = vn.getDate().toString().padStart(2, '0');
+  const m = (vn.getMonth() + 1).toString().padStart(2, '0');
+  const y = vn.getFullYear();
+  const h = vn.getHours().toString().padStart(2, '0');
+  const min = vn.getMinutes().toString().padStart(2, '0');
+  const s = vn.getSeconds().toString().padStart(2, '0');
+  return format === 'short' ? `${h}:${min} ${d}/${m}/${y}` : `${h}:${min}:${s} ${d}/${m}/${y}`;
+}
+
+// Helper: Parse comments from JSON string
+function parseComments(rawString) {
+  if (!rawString) return [];
+  const trimmed = rawString.trim();
+  if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (e) { return []; }
+  }
+  // Legacy text → wrap as comment
+  return [{ text: rawString, time: 'Note cũ', author: 'System' }];
+}
+
+// Singleton S3 client (reused across all uploads)
+let _s3Client = null;
+function getS3Client() {
+  if (!_s3Client) {
+    _s3Client = new S3Client({
+      region: 'auto',
+      endpoint: `https://${process.env.CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+      credentials: {
+        accessKeyId: process.env.CLOUDFLARE_R2_ACCESS_KEY_ID,
+        secretAccessKey: process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY,
+      },
+    });
+  }
+  return _s3Client;
+}
+
+// In-memory cache for getAllData (reduces Google Sheets API calls)
+let _dataCache = null;
+let _dataCacheTime = 0;
+const DATA_CACHE_TTL = 10000; // 10 seconds
+
+async function getCachedData(forceRefresh = false) {
+  if (!forceRefresh && _dataCache && (Date.now() - _dataCacheTime < DATA_CACHE_TTL)) {
+    return _dataCache;
+  }
+  _dataCache = await sheetsClient.getAllData();
+  _dataCacheTime = Date.now();
+  return _dataCache;
+}
+
+function invalidateDataCache() {
+  _dataCache = null;
+  _dataCacheTime = 0;
+}
+
+
+// ==================== SMART PARSING CONSTANTS ====================
+const VALID_DOMAINS = ['.com', '.vn', '.com.vn', '.myharavan.com', '.mysapo.net', '.net', '.asia', '.org', '.group', '.top', '.online'];
+const LINK_FEEDBACK_FORMATS = ['docs.google.com', 'drive.google.com', 'onedrive.live.com', 'figma.com', 'canva.com', 'trello.com'];
+const TAGS_LIST = ['hrv', 'haravan', 'gap', 'note', 'baogia', 'sapo'];
+const HOST_ALIAS_MAP = {
+  'quoc': 'Quốc', 'quốc': 'Quốc',
+  'taiz': 'Taiz', 'tai': 'Taiz', 'tài': 'Taiz',
+  'lam': 'Lâm', 'lâm': 'Lâm',
+  'nghia': 'Nghĩa', 'nghĩa': 'Nghĩa',
+  'tuan': 'Tuan', 'tuấn': 'Tuan'
+};
+
+function parseMessageContent(text, firstName) {
+  const message = text || '';
+  const cleaned = message.replace(/[^\p{L}\p{N}\s]/gu, ' ').trim();
+  const words = message.split(/\s+/);
+  const HOSTS = Object.values(TELEGRAM_ID_TO_HOST);
+
+  // Shop: first URL with valid domain that's NOT a feedback link
+  const shopDomains = words.filter(w =>
+    !LINK_FEEDBACK_FORMATS.some(f => w.includes(f)) && VALID_DOMAINS.some(d => w.includes(d))
+  ).map(u => (u.match(/https?:\/\/([^\/]+)/)?.[1] || u.split('/')[0]).replace(/^www\./, '').trim());
+  const shop = shopDomains[0] || '';
+
+  // Link: first URL matching feedback formats
+  const allUrls = message.match(/https?:\/\/\S+/g) || [];
+  const link = allUrls.find(u => LINK_FEEDBACK_FORMATS.some(f => u.includes(f))) || '';
+
+  // Host: from message keywords or fallback to firstName
+  let hostMatch = cleaned.split(/\s+/).filter(w => HOSTS.some(k => k.toLowerCase() === w.toLowerCase()));
+  if (hostMatch.length === 0) hostMatch = [firstName.trim()];
+  hostMatch = hostMatch.map(h => HOSTS.find(k => k.toLowerCase() === h.toLowerCase()) || h);
+  const host = [...new Set(hostMatch)].join(';');
+
+  // Tags
+  const tags = [...new Set(cleaned.split(/[\s,]+/).filter(w => TAGS_LIST.includes(w.toLowerCase())).map(t => t.toLowerCase()))].join(', ');
+
+  // Note: remaining text after removing bare domain URLs, host, tags
+  // Keep URLs that have path or query; remove bare domains only
+  let content = message;
+  words.filter(u => VALID_DOMAINS.some(d => u.includes(d))).forEach(u => {
+    try {
+      const urlStr = u.startsWith('http') ? u : 'https://' + u;
+      const urlObj = new URL(urlStr);
+      const hasPath = urlObj.pathname !== '/' && urlObj.pathname !== '';
+      const hasQuery = urlObj.search !== '';
+      if (!hasPath && !hasQuery) {
+        content = content.replace(u, '').trim();
+      }
+    } catch (e) {
+      // URL parsing failed → remove it (likely just a bare domain)
+      content = content.replace(u, '').trim();
+    }
+  });
+  hostMatch.forEach(h => { content = content.replace(new RegExp(`\\b${h}\\b`, 'gi'), '').trim(); });
+  cleaned.split(/[\s,]+/).filter(w => TAGS_LIST.includes(w.toLowerCase())).forEach(t => { content = content.replace(new RegExp(`\\b${t}\\b`, 'gi'), '').trim(); });
+  content = content.replace(/[.,;]{2,}/g, ' ').replace(/\s+/g, ' ').trim();
+
+  return { shop, link, host, tags, note: content, message };
+}
+
+async function handleCreateFromTelegram(chatId, firstName, text, photoId, userId, chatType) {
+  try {
+    const parsed = parseMessageContent(text || '', firstName);
+    const ts = formatVNTimestamp();
+
+    const row = [
+      Date.now().toString(), '', parsed.host, parsed.shop, parsed.link,
+      'Feedback', parsed.tags, '', '', parsed.note,
+      ts, parsed.message, userId, photoId || '', ''
+    ];
+    await sheetsClient.appendRow(row);
+    invalidateDataCache();
+
+    const data = await getCachedData(true);
+    const feedbackCount = (data.rows || []).filter(r => r.host === parsed.host && r.stage === 'Feedback').length;
+    await sendTelegramMessage(chatId, `✅ ${parsed.host} có ${feedbackCount} feedback`);
+
+    // Always notify group
+    const groupChatId = process.env.TELEGRAM_GROUP_CHAT_ID;
+    if (groupChatId) {
+      await sendTelegramMessage(groupChatId, `📬 ${parsed.host} có ${feedbackCount} feedback`);
+    }
+  } catch (error) {
+    console.error('Create from Telegram error:', error);
+    await sendTelegramMessage(chatId, `❌ Lỗi: ${error.message}`);
+  }
+}
+
+// ==================== TELEGRAM BOT WEBHOOK ====================
+app.post('/api/telegram-webhook', async (req, res) => {
+  try {
+    const update = req.body;
+    
+    // Only process message updates
+    if (!update.message) {
+      return res.json({ ok: true });
+    }
+    
+    const message = update.message;
+    const chatId = message.chat.id;
+    const userId = message.from.id.toString();
+    const text = (message.text || message.caption || '').trim();
+    const username = message.from.username || '';
+    const firstName = message.from.first_name || 'User';
+    const chatType = message.chat.type;
+    
+    // Extract photo if present
+    let photoId = '';
+    if (message.photo && message.photo.length > 0) {
+      photoId = message.photo[message.photo.length - 1].file_id;
+    }
+    
+    // Handle /myid command - show user's Telegram ID
+    if (text === '/myid') {
+      await sendTelegramMessage(chatId, 
+        `🆔 *Thông tin của bạn:*\n\n` +
+        `• User ID: \`${userId}\`\n` +
+        `• Chat ID: \`${chatId}\`\n` +
+        `• Username: @${username}`,
+        { parse_mode: 'Markdown' }
+      );
+      return res.json({ ok: true });
+    }
+    
+    // Handle /groupid command - show group chat ID
+    if (text === '/groupid') {
+      const chatTitle = message.chat.title || 'N/A';
+      
+      await sendTelegramMessage(chatId, 
+        `🆔 *Thông tin chat:*\n\n` +
+        `• Chat ID: \`${chatId}\`\n` +
+        `• Type: ${chatType}\n` +
+        `• Title: ${chatTitle}\n\n` +
+        `${chatType !== 'private' ? '✅ Đây là Group ID, copy vào .env!' : '⚠️ Đây là chat riêng, không phải group'}`,
+        { parse_mode: 'Markdown' }
+      );
+      return res.json({ ok: true });
+    }
+    
+    // Handle // command - Read feedbacks (//, // all, // Tên, // shop)
+    if (text === '//' || text.startsWith('// ')) {
+      const keyword = text.startsWith('// ') ? text.substring(3).trim().toLowerCase() : '';
+      const isAll = keyword === 'all';
+      
+      const currentUserHost = TELEGRAM_ID_TO_HOST[userId] || firstName;
+      const data = await getCachedData();
+      const rows = data.rows || [];
+      
+      let filtered;
+      if (isAll) {
+        filtered = rows.filter(r => r.stage === 'Feedback');
+      } else if (keyword) {
+        // Check if keyword matches a host name
+        const matchedHost = HOST_ALIAS_MAP[keyword];
+        if (matchedHost) {
+          filtered = rows.filter(r => r.host === matchedHost && r.stage === 'Feedback');
+        } else {
+          // Search by shop name
+          filtered = rows.filter(r => r.stage === 'Feedback' && r.shop && r.shop.toLowerCase().includes(keyword));
+        }
+      } else {
+        // // without keyword → own feedbacks
+        filtered = rows.filter(r => r.host === currentUserHost && r.stage === 'Feedback');
+      }
+      
+      const MAX_ITEMS = 20;
+      if (filtered.length === 0) {
+        await sendTelegramMessage(chatId, '🎉🎉 Hết Feedback! 🎉🎉');
+        return res.json({ ok: true });
+      }
+      
+      if (filtered.length > MAX_ITEMS) {
+        await sendTelegramMessage(chatId, `📊 Hiện ${MAX_ITEMS}/${filtered.length} feedback (mới nhất)`);
+        filtered = filtered.slice(-MAX_ITEMS);
+      }
+      
+      telegramRequest(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendChatAction`, { chat_id: chatId, action: 'typing' });
+      
+      for (const fb of filtered) {
+        const shop = fb.shop || 'N/A';
+        let note = fb.note || fb.message || '';
+        if (note.length > 500) note = note.substring(0, 500) + '...';
+        
+        let caption = `• ID: #${fb.rowNumber}\n`;
+        caption += `• Shop: ${shop}\n`;
+        caption += `• File: ${fb.link || 'KHÔNG có file'}`;
+        if (note) caption += `\n• Note: ${note}`;
+        
+        try {
+          if (fb.imageId) {
+            await sendTelegramPhoto(chatId, fb.imageId, caption, { disable_web_page_preview: true }, fb.rowNumber);
+          } else {
+            await sendTelegramMessage(chatId, caption, { disable_web_page_preview: true });
+          }
+        } catch (err) {
+          console.error('Send error:', err.message);
+          if (fb.imageId) {
+            await sendTelegramMessage(chatId, caption + '\n\n📷 (Không thể tải ảnh)', { disable_web_page_preview: true }).catch(() => {});
+          }
+        }
+      }
+      
+      return res.json({ ok: true });
+    }
+    
+    // Handle reply to feedback messages (with ID in text or caption for photos)
+    if (message.reply_to_message) {
+      const originalText = message.reply_to_message.text || message.reply_to_message.caption || '';
+      
+      // Extract rowNumber from #123 pattern
+      const match = originalText.match(/#(\d+)/);
+      if (match) {
+        const rowNumber = parseInt(match[1]);
+        
+        // Get text from either message.text or message.caption (for photo replies)
+        const replyText = text || message.caption || '';
+        const lowerText = replyText.toLowerCase();
+        
+        try {
+          // Check if message starts with "Done"
+          if (lowerText === 'done' || lowerText.startsWith('done ') || lowerText.startsWith('done-') || lowerText.startsWith('done:')) {
+            // Update stage to Done
+            const now = new Date();
+            const vnTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' }));
+            const d = vnTime.getDate().toString().padStart(2, '0');
+            const m = (vnTime.getMonth() + 1).toString().padStart(2, '0');
+            const y = vnTime.getFullYear();
+            const h = vnTime.getHours().toString().padStart(2, '0');
+            const min = vnTime.getMinutes().toString().padStart(2, '0');
+            const s = vnTime.getSeconds().toString().padStart(2, '0');
+            const timestamp = `${h}:${min}:${s} ${d}/${m}/${y}`;
+            
+            await sheetsClient.updateCell(rowNumber, 'F', 'Done');
+            await sheetsClient.updateCell(rowNumber, 'O', timestamp);
+            
+            // If there's additional text after "Done" or photo, add as comment
+            const extraText = replyText.replace(/^done[\s\-:]*/i, '').trim();
+            let commentText = '';
+            
+            // Check for document (uncompressed image) first, then photo
+            if (message.document && message.document.mime_type && message.document.mime_type.startsWith('image/')) {
+              const photoUrl = await uploadTelegramPhotoToR2(message.document.file_id);
+              commentText = `[Telegram] ${firstName}: ${extraText || 'Done'}\n${photoUrl}`;
+            } else if (message.photo && message.photo.length > 0) {
+              // Get largest photo (compressed)
+              const photo = message.photo[message.photo.length - 1];
+              const photoUrl = await uploadTelegramPhotoToR2(photo.file_id);
+              commentText = `[Telegram] ${firstName}: ${extraText || 'Done'}\n${photoUrl}`;
+            } else if (extraText) {
+              commentText = `[Telegram] ${firstName}: ${extraText}`;
+            }
+            
+            if (commentText) {
+              await addCommentToFeedback(rowNumber, commentText);
+            }
+            
+            await sendTelegramMessage(chatId, `✅ #${rowNumber} → Done!`);
+            
+            // Auto-refresh: send remaining feedbacks
+            const data = await sheetsClient.getAllData();
+            const rows = data.rows || [];
+            const remainingFeedbacks = rows.filter(r => 
+              r.host === TELEGRAM_ID_TO_HOST[userId] && r.stage === 'Feedback'
+            );
+            
+            
+            if (remainingFeedbacks.length > 0) {
+              await sendTelegramMessage(chatId, `📋 Còn ${remainingFeedbacks.length} feedback:`);
+              
+              // Send messages sequentially to avoid ETIMEDOUT
+              for (const fb of remainingFeedbacks) {
+                const shopName = fb.shop || 'N/A';
+                let noteText = fb.note || fb.message || '';
+                if (noteText.length > 500) noteText = noteText.substring(0, 500) + '... (quá dài, xem trên Dashboard)';
+                
+                let caption = `• ID: #${fb.rowNumber}\n`;
+                caption += `• Shop: ${shopName}\n`;
+                caption += `• File: ${fb.link || 'KHÔNG có file'}`;
+                if (noteText) caption += `\n• Note: ${noteText}`;
+                
+                try {
+                  if (fb.imageId) {
+                    await sendTelegramPhoto(chatId, fb.imageId, caption, { disable_web_page_preview: true }, fb.rowNumber);
+                  } else {
+                    await sendTelegramMessage(chatId, caption, { disable_web_page_preview: true });
+                  }
+                } catch (err) {
+                  console.error('Send error:', err.message);
+                  if (fb.imageId) {
+                    await sendTelegramMessage(chatId, caption + '\n\n📷 (Không thể tải ảnh)', { disable_web_page_preview: true }).catch(() => {});
+                  }
+                }
+              }
+            } else {
+              await sendTelegramMessage(chatId, `🎉 Không còn feedback nào!`);
+            }
+          } else if (lowerText === 'del' || lowerText.startsWith('del ')) {
+            // Delete feedback (set Stage = Deleted)
+            const delNow = new Date();
+            const delVn = new Date(delNow.toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' }));
+            const delTs = `${delVn.getHours().toString().padStart(2,'0')}:${delVn.getMinutes().toString().padStart(2,'0')}:${delVn.getSeconds().toString().padStart(2,'0')} ${delVn.getDate().toString().padStart(2,'0')}/${(delVn.getMonth()+1).toString().padStart(2,'0')}/${delVn.getFullYear()}`;
+            await sheetsClient.updateCell(rowNumber, 'F', 'Deleted');
+            await sheetsClient.updateCell(rowNumber, 'O', delTs);
+            await sendTelegramMessage(chatId, `🗑️ Đã xóa ID #${rowNumber}`);
+          } else {
+            // Any other reply → add as comment
+            let commentText = `[Telegram] ${firstName}: ${replyText}`;
+            
+            // Check for document (uncompressed) first, then photo
+            if (message.document && message.document.mime_type && message.document.mime_type.startsWith('image/')) {
+              const photoUrl = await uploadTelegramPhotoToR2(message.document.file_id);
+              commentText += `\n${photoUrl}`;
+            } else if (message.photo && message.photo.length > 0) {
+              const photo = message.photo[message.photo.length - 1];
+              const photoUrl = await uploadTelegramPhotoToR2(photo.file_id);
+              commentText += `\n${photoUrl}`;
+            }
+            
+            await addCommentToFeedback(rowNumber, commentText);
+          }
+        } catch (error) {
+          await sendTelegramMessage(chatId, `❌ Lỗi: ${error.message}`);
+        }
+        return res.json({ ok: true });
+      }
+    }
+    
+    // Handle /start command
+    if (text === '/start') {
+      await sendTelegramMessage(chatId, 
+        `👋 Xin chào ${firstName}!\n\n` +
+        `🔹 /f <nội dung> - Tạo feedback\n` +
+        `🔹 // - Xem feedback\n` +
+        `🔹 /help - Xem hướng dẫn`
+      );
+      return res.json({ ok: true });
+    }
+    
+    // Handle /help command
+    if (text === '/help') {
+      await sendTelegramMessage(chatId,
+        `📚 *Hướng dẫn sử dụng Bot*\n\n` +
+        `*🆕 Tạo feedback:*\n` +
+        `• \`/f <nội dung>\` - Tạo feedback mới\n` +
+        `• Chat riêng: gửi trực tiếp, bot tự tạo\n\n` +
+        `*📋 Xem feedback:*\n` +
+        `• \`//\` - Xem feedback của mình\n` +
+        `• \`// Tên\` - Xem theo host\n` +
+        `• \`// all\` - Xem tất cả\n` +
+        `• \`// shop\` - Xem theo shop\n\n` +
+        `*✅ Xử lý (Reply tin nhắn):*\n` +
+        `• \`done\` - Hoàn thành\n` +
+        `• \`done <ghi chú>\` - Done + note\n` +
+        `• \`del\` - Xóa feedback\n` +
+        `• text/ảnh khác - Thêm comment\n\n` +
+        `*🔧 Khác:* \`/myid\` \`/groupid\``,
+        { parse_mode: 'Markdown' }
+      );
+      return res.json({ ok: true });
+    }
+    
+    // Handle /f command - Create feedback (group + private)
+    if (text.startsWith('/f ') || text.startsWith('/f@')) {
+      const createText = text.replace(/^\/f(@\S+)?\s*/, '').trim();
+      if (!createText && !photoId) {
+        await sendTelegramMessage(chatId, '⚠️ Cần nội dung.\nVD: `/f neymarsport.com fix lỗi`', { parse_mode: 'Markdown' });
+        return res.json({ ok: true });
+      }
+      await handleCreateFromTelegram(chatId, firstName, createText, photoId, userId, chatType);
+      return res.json({ ok: true });
+    }
+    
+    // Direct message in PRIVATE chat → auto create feedback
+    if (chatType === 'private' && (text || photoId)) {
+      await handleCreateFromTelegram(chatId, firstName, text, photoId, userId, chatType);
+      return res.json({ ok: true });
+    }
+    
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('Telegram webhook error:', error);
+    res.json({ ok: true }); // Always return ok to Telegram
+  }
+});
+
+// Low-level HTTPS request to Telegram (uses system TCP stack like curl, forces IPv4)
+function telegramRequest(url, data, timeoutMs = 15000) {
+  return new Promise((resolve, reject) => {
+    const postData = JSON.stringify(data);
+    const urlObj = new URL(url);
+    const options = {
+      hostname: urlObj.hostname,
+      path: urlObj.pathname + urlObj.search,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(postData) },
+      timeout: timeoutMs,
+      family: 4 // Force IPv4 only
+    };
+    const req = https.request(options, (res) => {
+      let body = '';
+      res.on('data', chunk => body += chunk);
+      res.on('end', () => {
+        try { resolve(JSON.parse(body)); } catch (e) { resolve({ ok: true }); }
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('HTTPS request timeout')); });
+    req.write(postData);
+    req.end();
+  });
+}
+
+// Send message to Telegram (using https module, forced IPv4)
+async function sendTelegramMessage(chatId, text, options = {}) {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  if (!botToken) { console.error('TELEGRAM_BOT_TOKEN not configured'); return; }
+  
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const result = await telegramRequest(
+        `https://api.telegram.org/bot${botToken}/sendMessage`,
+        { chat_id: chatId, text: text, ...options }
+      );
+      return result;
+    } catch (error) {
+      console.error(`[Telegram] sendMessage attempt ${attempt}/3 FAILED | ${error.message}`);
+      if (attempt < 3) await new Promise(r => setTimeout(r, 1000 * attempt));
+      else console.error(`[Telegram] GAVE UP for chat ${chatId}`);
+    }
+  }
+}
+
+// Send photo to Telegram (fast: send file_id directly, R2 upload in background)
+async function sendTelegramPhoto(chatId, fileId, caption = '', options = {}, rowNumber = null) {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  if (!botToken) { console.error('TELEGRAM_BOT_TOKEN not configured'); return; }
+  
+  try {
+    // Determine what to send: URL, cached R2, or raw file_id
+    let photoToSend = fileId;
+    if (fileId.startsWith('http://') || fileId.startsWith('https://')) {
+      photoToSend = fileId;
+    } else if (imageUrlCache.has(fileId)) {
+      photoToSend = imageUrlCache.get(fileId);
+    }
+    // Otherwise use file_id directly (Telegram handles it natively - FAST)
+    
+    // Send photo immediately
+    let result;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        result = await telegramRequest(
+          `https://api.telegram.org/bot${botToken}/sendPhoto`,
+          { chat_id: chatId, photo: photoToSend, caption: caption, ...options },
+          20000
+        );
+        if (result.ok) break;
+        throw new Error(result.description || 'Failed to send photo');
+      } catch (err) {
+        console.error(`[Telegram] sendPhoto attempt ${attempt}/3 FAILED | ${err.message}`);
+        if (attempt < 3) await new Promise(r => setTimeout(r, 1000 * attempt));
+        else throw err;
+      }
+    }
+    
+    // Upload to R2 in background (don't block response) for uncached file_ids
+    if (!fileId.startsWith('http') && !imageUrlCache.has(fileId)) {
+      uploadToR2InBackground(botToken, fileId, rowNumber).catch(err =>
+        console.error('Background R2 upload failed:', err.message)
+      );
+    }
+  } catch (error) {
+    console.error('Failed to send Telegram photo:', error);
+    throw error;
+  }
+}
+
+// Background R2 upload (non-blocking)
+async function uploadToR2InBackground(botToken, fileId, rowNumber) {
+  try {
+    const fileResponse = await fetch(`https://api.telegram.org/bot${botToken}/getFile?file_id=${fileId}`);
+    const fileData = await fileResponse.json();
+    if (!fileData.ok || !fileData.result?.file_path) return;
+    
+    const filePath = fileData.result.file_path;
+    const fileUrl = `https://api.telegram.org/file/bot${botToken}/${filePath}`;
+    const downloadResponse = await fetch(fileUrl);
+    if (!downloadResponse.ok) return;
+    
+    const buffer = Buffer.from(await downloadResponse.arrayBuffer());
+    const fileName = `telegram/${Date.now()}_${filePath.split('/').pop()}`;
+    await getS3Client().send(new PutObjectCommand({
+      Bucket: process.env.CLOUDFLARE_R2_BUCKET_NAME,
+      Key: fileName,
+      Body: buffer,
+      ContentType: 'image/jpeg',
+    }));
+    
+    const r2Url = `${process.env.CLOUDFLARE_CDN_URL}/${fileName}`;
+    imageUrlCache.set(fileId, r2Url);
+    
+    if (rowNumber) {
+      await sheetsClient.updateCell(rowNumber, 'N', r2Url);
+      console.log(`[R2] Background upload done: row ${rowNumber} → ${r2Url}`);
+    }
+  } catch (err) {
+    console.error('[R2] Background upload error:', err.message);
+  }
+}
+
+// Upload Telegram photo to R2 and return CDN URL
+async function uploadTelegramPhotoToR2(fileId) {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  if (!botToken) {
+    return 'Error: Bot token not configured';
+  }
+  
+  try {
+    // Step 1: Get file path from Telegram
+    const fileResponse = await fetch(`https://api.telegram.org/bot${botToken}/getFile?file_id=${fileId}`);
+    const fileData = await fileResponse.json();
+    
+    if (!fileData.ok || !fileData.result || !fileData.result.file_path) {
+      return 'Error: Could not get file from Telegram';
+    }
+    
+    const filePath = fileData.result.file_path;
+    const fileUrl = `https://api.telegram.org/file/bot${botToken}/${filePath}`;
+    
+    // Step 2: Download file from Telegram
+    const downloadResponse = await fetch(fileUrl);
+    if (!downloadResponse.ok) {
+      return 'Error: Could not download file';
+    }
+    
+    const arrayBuffer = await downloadResponse.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    
+    // Step 3: Upload to R2
+    
+    // Generate unique filename
+    const ext = filePath.split('.').pop() || 'jpg';
+    const filename = `telegram/${Date.now()}-${crypto.randomUUID()}.${ext}`;
+    
+    await getS3Client().send(new PutObjectCommand({
+      Bucket: process.env.CLOUDFLARE_R2_BUCKET_NAME.trim(),
+      Key: filename,
+      Body: buffer,
+      ContentType: `image/${ext}`
+    }));
+    
+    // Return CDN URL
+    return `${process.env.CLOUDFLARE_CDN_URL}/${filename}`;
+  } catch (error) {
+    console.error('Failed to upload to R2:', error);
+    return 'Error: ' + error.message;
+  }
+}
+
+// Notify host about feedback count via Telegram Group
+async function notifyHostFeedbackCount(host) {
+  const groupChatId = process.env.TELEGRAM_GROUP_CHAT_ID;
+  if (!groupChatId) {
+    console.warn('[Notification] TELEGRAM_GROUP_CHAT_ID not configured');
+    return;
+  }
+  
+  console.log(`[Notification] Checking feedback count for host: ${host}`);
+  
+  try {
+    const data = await getCachedData();
+    const rows = data.rows || [];
+    const feedbackCount = rows.filter(r => r.host === host && r.stage === 'Feedback').length;
+    
+    console.log(`[Notification] ${host} has ${feedbackCount} feedback(s)`);
+    
+    if (feedbackCount > 0) {
+      const message = `📬 ${host} có ${feedbackCount} feedback`;
+      console.log(`[Notification] Sending to group ${groupChatId}: ${message}`);
+      await sendTelegramMessage(groupChatId, message);
+      console.log(`[Notification] Message sent successfully`);
+    } else {
+      console.log(`[Notification] No feedback to notify`);
+    }
+  } catch (error) {
+    console.error('[Notification] Failed to notify group:', error);
+  }
+}
+
+
+// Add comment to feedback (for Telegram integration)
+async function addCommentToFeedback(rowNumber, commentText) {
+  const currentRow = await sheetsClient.getRow(rowNumber);
+  let comments = [];
+  
+  const currentContent = currentRow[7] || '';
+  if (currentContent) {
+    if (currentContent.trim().startsWith('[') && currentContent.trim().endsWith(']')) {
+      try {
+        comments = JSON.parse(currentContent);
+        if (!Array.isArray(comments)) comments = [];
+      } catch (e) {
+        comments = [];
+      }
+    } else {
+      comments.push({
+        text: currentContent,
+        time: 'Note cũ',
+        author: 'System'
+      });
+    }
+  }
+
+  const timestamp = formatVNTimestamp('short');
+  
+  comments.push({
+    text: commentText,
+    time: timestamp,
+    author: 'Telegram'
+  });
+
+  await sheetsClient.updateCell(rowNumber, 'H', JSON.stringify(comments));
+}
+
 // API Key Middleware
 app.use('/api', (req, res, next) => {
+  // Skip API key check for Telegram endpoints
+  if (req.path.startsWith('/telegram-')) {
+    return next();
+  }
+  
   const apiKey = req.headers['x-api-key'];
   const validKey = process.env.API_KEY;
   
   if (!validKey) {
-    // If no key configured on server, warning but allow? 
-    // Or better: Fail closed. But for now let's blocking if key IS configured.
-    // If .env has key, we require it.
     console.warn('API_KEY not set in .env! Securing is disabled.');
     return next();
   }
@@ -27,6 +742,55 @@ app.use('/api', (req, res, next) => {
     return res.status(403).json({ success: false, message: 'Forbidden: Invalid API Key' });
   }
   next();
+});
+
+// Telegram Webhook Setup Endpoint
+app.get('/api/telegram-setup', async (req, res) => {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  if (!botToken) {
+    return res.json({ success: false, message: 'TELEGRAM_BOT_TOKEN not configured' });
+  }
+  
+  // Get the webhook URL from query or use default
+  const webhookUrl = req.query.url || `https://api-feedback.f1genz.dev/api/telegram-webhook`;
+  
+  try {
+    // Set webhook
+    const response = await fetch(`https://api.telegram.org/bot${botToken}/setWebhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: webhookUrl })
+    });
+    const result = await response.json();
+    
+    if (result.ok) {
+      return res.json({ 
+        success: true, 
+        message: `Webhook đã được thiết lập: ${webhookUrl}`,
+        result 
+      });
+    } else {
+      return res.json({ success: false, message: result.description || 'Failed to set webhook', result });
+    }
+  } catch (error) {
+    return res.json({ success: false, message: error.message });
+  }
+});
+
+// Get Telegram Webhook Info
+app.get('/api/telegram-info', async (req, res) => {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  if (!botToken) {
+    return res.json({ success: false, message: 'TELEGRAM_BOT_TOKEN not configured' });
+  }
+  
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${botToken}/getWebhookInfo`);
+    const result = await response.json();
+    return res.json({ success: true, webhookInfo: result.result });
+  } catch (error) {
+    return res.json({ success: false, message: error.message });
+  }
 });
 
 // Routes
@@ -120,12 +884,23 @@ app.get('/api/exec', async (req, res) => {
   }
 });
 
-// Telegram Image Proxy Endpoint
+// Telegram Image Proxy Endpoint (uses old bot token for image access)
 app.get('/api/telegram-image', async (req, res) => {
   const fileId = req.query.fileId;
+  const rowNumber = req.query.rowNumber; // Optional: to update Sheet
   
   if (!fileId) {
     return res.json({ success: false, message: 'Missing fileId parameter' });
+  }
+  
+  // If already a URL, return it directly
+  if (fileId.startsWith('http://') || fileId.startsWith('https://')) {
+    return res.json({ success: true, url: fileId });
+  }
+  
+  // Check cache first
+  if (imageUrlCache.has(fileId)) {
+    return res.json({ success: true, url: imageUrlCache.get(fileId) });
   }
   
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
@@ -145,10 +920,45 @@ app.get('/api/telegram-image', async (req, res) => {
     const filePath = data.result.file_path;
     const fileUrl = `https://api.telegram.org/file/bot${botToken}/${filePath}`;
     
+    // Download and upload to R2 for permanent URL
+    try {
+      const downloadResponse = await fetch(fileUrl);
+      if (downloadResponse.ok) {
+        const arrayBuffer = await downloadResponse.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
+        
+        // Upload to R2
+        
+        const fileName = `telegram/${Date.now()}_${filePath.split('/').pop()}`;
+        await getS3Client().send(new PutObjectCommand({
+          Bucket: process.env.CLOUDFLARE_R2_BUCKET_NAME,
+          Key: fileName,
+          Body: buffer,
+          ContentType: 'image/jpeg',
+        }));
+        
+        const r2Url = `${process.env.CLOUDFLARE_CDN_URL}/${fileName}`;
+        
+        // Cache it
+        imageUrlCache.set(fileId, r2Url);
+        
+        // Update Sheet if rowNumber provided
+        if (rowNumber) {
+          await sheetsClient.updateCell(parseInt(rowNumber), 'N', r2Url);
+          console.log(`Updated Sheet row ${rowNumber} with R2 URL`);
+        }
+        
+        return res.json({ success: true, url: r2Url });
+      }
+    } catch (uploadError) {
+      console.error('Failed to upload to R2:', uploadError.message);
+    }
+    
+    // Fallback to Telegram URL (temporary)
     return res.json({ 
       success: true, 
       url: fileUrl,
-      fileId: fileId
+      temporary: true
     });
   } catch (error) {
     console.error('Telegram API Error:', error);
@@ -159,7 +969,7 @@ app.get('/api/telegram-image', async (req, res) => {
 // Helper Functions
 
 async function getDashboardData() {
-  const data = await sheetsClient.getAllData();
+  const data = await getCachedData();
   const rows = data.rows || [];
 
   // Calculate stats
@@ -221,38 +1031,35 @@ async function getHistory() {
 async function createFeedback(feedback) {
   if (!feedback) throw new Error('No feedback data');
   
-  const now = new Date();
-  // Format: HH:mm:ss dd/MM/yyyy (Manual formatting to ensure consistency)
-  const d = now.getDate().toString().padStart(2, '0');
-  const m = (now.getMonth() + 1).toString().padStart(2, '0');
-  const y = now.getFullYear();
-  const h = now.getHours().toString().padStart(2, '0');
-  const min = now.getMinutes().toString().padStart(2, '0');
-  const s = now.getSeconds().toString().padStart(2, '0');
-  const timestamp = `${h}:${min}:${s} ${d}/${m}/${y}`;
+  const timestamp = formatVNTimestamp();
   
   // Prepare row data (Columns A-O)
-  // A: Deadline, B: Host, C: Shop, D: Link, E: Stage, F: Tags, G: Dev_note, H: Image_note, I: Note, J: Time, K: Message, L: MessageID, M: ImageID, N: ID, O: UpdatedAt
+  // A: ID, B: Deadline, C: Host, D: Shop, E: Link, F: Stage, G: Tags, H: Dev_note, I: Image_note, J: Note, K: Time, L: Message, M: MessageID, N: ImageID, O: UpdatedAt
   const row = [
-    feedback.deadline || '',        
-    feedback.host || '',            
-    feedback.shop || '',            
-    feedback.link || '',            
-    feedback.stage || 'Feedback',   
-    feedback.tags || '',            
-    feedback.devNote || '',         
+    Date.now().toString(),          // ID (timestamp)
+    feedback.deadline || '',        // Deadline
+    feedback.host || '',            // Host
+    feedback.shop || '',            // Shop
+    feedback.link || '',            // Link
+    feedback.stage || 'Feedback',   // Stage
+    feedback.tags || '',            // Tags
+    feedback.devNote || '',         // Dev_note
     '',                             // Image_note
-    feedback.note || '',            
+    feedback.note || '',            // Note
     timestamp,                      // Time (created)
     feedback.note || '',            // Message (copy of note for now)
     '',                             // MessageID
     '',                             // ImageID
-    crypto.randomUUID(),            // ID
     timestamp                       // UpdatedAt
   ];
 
   const success = await sheetsClient.appendRow(row);
+  invalidateDataCache();
   if (success) {
+    // Notify host if stage is Feedback
+    if ((feedback.stage || 'Feedback') === 'Feedback' && feedback.host) {
+      await notifyHostFeedbackCount(feedback.host);
+    }
     // await sheetsClient.logHistory('CREATE', `Tạo feedback: ${feedback.shop || 'N/A'}`); // DISABLED
     return { success: true, message: 'Đã tạo feedback thành công!' };
   } else {
@@ -263,87 +1070,65 @@ async function createFeedback(feedback) {
 async function updateFeedback(rowNumber, updates) {
   if (!rowNumber) throw new Error('Missing rowNumber');
   
-  // We need to fetch current data first to merge updates properly?
-  // Or we modify sheetsClient to update specific cells?
-  // Code.gs gets existing row, modifies it, and overwrites.
-  
-  // Optimized approach: 
-  // Read specific row using getAllData is inefficient if we just need one row.
-  // But getAllData reads everything anyway.
-  
-  // Better: read just that row from sheet?
-  // Let's implement reading a single row in sheetsClient if needed, or just iterate `getAllData` since it's cached in memory usually?
-  // No, on serverless, no cache.
-  // Actually, updateRow expects full row array.
-  // Let's implement `getRow` in sheetsClient. NO wait, I can just use getValues for that specific range.
-  
-  // Since sheetsClient doesn't have getRow, I'll use getAllData logic inside here or add getRow to client.
-  // Adding getRow to client is better. But for now I will cheat:
-  // Since our `updates` object only has specific fields, we need to know the OLD values to preserve them.
-  // BUT Code.gs `updateFeedback` logic reads the row first.
-  
-  // I will add `getRow(rowNumber)` to `sheetsClient` now. Or inline it.
-  // Let's assume I'll add it.
-  
-  // For now, let's just implement `getRow` logic here using sheetsClient instance if I can access sheets object? No it's encapsulated.
-  // I should update sheetsClient.js to include getRow.
-  
-  // Wait, I already wrote sheetsClient.js without getRow. I should add it.
-  
-  // Re-reading sheetsClient.js content... it doesn't have getRow.
-  // I'll assume for this file that `sheetsClient.getRow(rowNumber)` exists and I'll update sheetsClient.js in next step.
-  
   const currentRowRaw = await sheetsClient.getRow(rowNumber); 
   // Expecting array of values A-N
   
   if (!currentRowRaw) throw new Error('Row not found');
   
   // Merge logic
-  // Columns: A-N (0-13)
-  // A:Deadline, B:Host, C:Shop, D:Link, E:Stage, F:Tags, G:Dev, H:ImgN, I:Note, J:Time, K:Msg, L:MsgID, M:ImgID, N:ID
+  // Columns: A-O (0-14)
+  // A:ID, B:Deadline, C:Host, D:Shop, E:Link, F:Stage, G:Tags, H:Dev, I:ImgN, J:Note, K:Time, L:Msg, M:MsgID, N:ImgID, O:UpdatedAt
   
   const newRow = [...currentRowRaw];
   // Ensure we have enough empty strings (15 columns: A-O)
   while(newRow.length < 15) newRow.push('');
   
-  if (updates.deadline !== undefined) newRow[0] = updates.deadline;
-  if (updates.host !== undefined) newRow[1] = updates.host;
-  if (updates.shop !== undefined) newRow[2] = updates.shop;
-  if (updates.link !== undefined) newRow[3] = updates.link;
-  if (updates.stage !== undefined) newRow[4] = updates.stage;
-  if (updates.tags !== undefined) newRow[5] = updates.tags;
-  if (updates.devNote !== undefined) newRow[6] = updates.devNote;
-  if (updates.note !== undefined) newRow[8] = updates.note;
-  if (updates.message !== undefined) newRow[10] = updates.message;
-  // Keep ID (13) and Time (9) same
+  // Keep ID (0) same
+  if (updates.deadline !== undefined) newRow[1] = updates.deadline;
+  if (updates.host !== undefined) newRow[2] = updates.host;
+  if (updates.shop !== undefined) newRow[3] = updates.shop;
+  if (updates.link !== undefined) newRow[4] = updates.link;
+  if (updates.stage !== undefined) newRow[5] = updates.stage;
+  if (updates.tags !== undefined) newRow[6] = updates.tags;
+  if (updates.devNote !== undefined) newRow[7] = updates.devNote;
+  if (updates.note !== undefined) newRow[9] = updates.note;
+  if (updates.message !== undefined) newRow[11] = updates.message;
+  // Keep Time (10) same
   
-  // Update the updated_at timestamp (column O, index 14)
-  const now = new Date();
-  const d = now.getDate().toString().padStart(2, '0');
-  const m = (now.getMonth() + 1).toString().padStart(2, '0');
-  const y = now.getFullYear();
-  const h = now.getHours().toString().padStart(2, '0');
-  const min = now.getMinutes().toString().padStart(2, '0');
-  const s = now.getSeconds().toString().padStart(2, '0');
-  newRow[14] = `${h}:${min}:${s} ${d}/${m}/${y}`;
+  newRow[14] = formatVNTimestamp();
   
   await sheetsClient.updateRow(rowNumber, newRow);
+  invalidateDataCache();
+  
+  // Notify host if stage changed to Feedback
+  if (updates.stage === 'Feedback' && newRow[2]) {
+    await notifyHostFeedbackCount(newRow[2]);
+  }
+  
   return { success: true, message: 'Cập nhật thành công!' };
 }
 
 async function updateStage(rowNumber, newStage) {
-  // Update Column E (Stage) and Column O (UpdatedAt)
-  const now = new Date();
-  const d = now.getDate().toString().padStart(2, '0');
-  const m = (now.getMonth() + 1).toString().padStart(2, '0');
-  const y = now.getFullYear();
-  const h = now.getHours().toString().padStart(2, '0');
-  const min = now.getMinutes().toString().padStart(2, '0');
-  const s = now.getSeconds().toString().padStart(2, '0');
-  const timestamp = `${h}:${min}:${s} ${d}/${m}/${y}`;
+  // Get current row to check host
+  const currentRow = await sheetsClient.getRow(rowNumber);
+  const host = currentRow[2]; // Column C = Host
   
-  await sheetsClient.updateCell(rowNumber, 'E', newStage);
+  const timestamp = formatVNTimestamp();
+  
+  await sheetsClient.updateCell(rowNumber, 'F', newStage);
   await sheetsClient.updateCell(rowNumber, 'O', timestamp);
+  invalidateDataCache();
+  
+  // Notify host if stage changed to Feedback
+  if (newStage === 'Feedback' && host) {
+    console.log(`[Notification] Stage changed to Feedback for host: ${host}`);
+    try {
+      await notifyHostFeedbackCount(host);
+    } catch (notifyError) {
+      console.error('[Notification] Error calling notifyHostFeedbackCount:', notifyError);
+    }
+  }
+  
   // await sheetsClient.logHistory('UPDATE_STAGE', `Row ${rowNumber} -> ${newStage}`); // DISABLED
   return { success: true, message: `Đã cập nhật Stage thành "${newStage}"` };
 }
@@ -352,6 +1137,7 @@ async function deleteFeedback(rowNumber) {
   if (!rowNumber) throw new Error('Missing rowNumber');
   
   await sheetsClient.deleteRow(rowNumber);
+  invalidateDataCache();
   // await sheetsClient.logHistory('DELETE', `Xóa row ${rowNumber}`); // DISABLED
   return { success: true, message: 'Đã xóa feedback!' };
 }
@@ -364,17 +1150,10 @@ async function bulkUpdateStage(rowNumbers, newStage) {
   }
   if (!newStage) throw new Error('Missing newStage');
 
-  const now = new Date();
-  const d = now.getDate().toString().padStart(2, '0');
-  const m = (now.getMonth() + 1).toString().padStart(2, '0');
-  const y = now.getFullYear();
-  const h = now.getHours().toString().padStart(2, '0');
-  const min = now.getMinutes().toString().padStart(2, '0');
-  const s = now.getSeconds().toString().padStart(2, '0');
-  const timestamp = `${h}:${min}:${s} ${d}/${m}/${y}`;
+  const timestamp = formatVNTimestamp();
 
   for (const rowNumber of rowNumbers) {
-    await sheetsClient.updateCell(rowNumber, 'E', newStage);
+    await sheetsClient.updateCell(rowNumber, 'F', newStage);
     await sheetsClient.updateCell(rowNumber, 'O', timestamp);
   }
 
@@ -406,7 +1185,7 @@ async function addComment(rowNumber, commentText) {
   let comments = [];
   
   // Parse existing comments or preserve legacy text
-  const currentContent = currentRow[6] || '';
+  const currentContent = currentRow[7] || '';
   if (currentContent) {
     if (currentContent.trim().startsWith('[') && currentContent.trim().endsWith(']')) {
       try {
@@ -425,21 +1204,7 @@ async function addComment(rowNumber, commentText) {
     }
   }
 
-  // Create new comment with VN Timezone
-  const now = new Date();
-  const options = { timeZone: 'Asia/Ho_Chi_Minh', hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit', year: 'numeric', hour12: false };
-  // Format: "22:30 09/01/2026"
-  // toLocaleString returns "22:30:00 09/01/2026" or similar depending on locale, let's normalize
-  const timeStr = now.toLocaleString('vi-VN', options).replace(/:\d{2} /, ' '); 
-  // Simplified manual formatting to ensure consistency if needed, but locale vi-VN is usually good.
-  // Actually, let's stick to the previous format "HH:mm dd/MM/yyyy"
-  const vnTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' }));
-  const d = vnTime.getDate().toString().padStart(2, '0');
-  const m = (vnTime.getMonth() + 1).toString().padStart(2, '0');
-  const y = vnTime.getFullYear();
-  const h = vnTime.getHours().toString().padStart(2, '0');
-  const min = vnTime.getMinutes().toString().padStart(2, '0');
-  const timestamp = `${h}:${min} ${d}/${m}/${y}`;
+  const timestamp = formatVNTimestamp('short');
   
   comments.push({
     text: commentText.trim(),
@@ -447,7 +1212,7 @@ async function addComment(rowNumber, commentText) {
     author: 'User'
   });
 
-  await sheetsClient.updateCell(rowNumber, 'G', JSON.stringify(comments));
+  await sheetsClient.updateCell(rowNumber, 'H', JSON.stringify(comments));
   
   return { success: true, message: 'Đã thêm comment!', comments };
 }
@@ -458,23 +1223,7 @@ async function getComments(rowNumber) {
   const currentRow = await sheetsClient.getRow(rowNumber);
   let comments = [];
   
-  const currentContent = currentRow[6] || '';
-  if (currentContent) {
-    if (currentContent.trim().startsWith('[') && currentContent.trim().endsWith(']')) {
-      try {
-        comments = JSON.parse(currentContent);
-        if (!Array.isArray(comments)) comments = [];
-      } catch (e) {
-        comments = [];
-      }
-    } else {
-      comments.push({
-        text: currentContent,
-        time: 'Note cũ',
-        author: 'System'
-      });
-    }
-  }
+  comments = parseComments(currentRow[7] || '');
 
   return { success: true, comments };
 }
@@ -484,23 +1233,11 @@ async function deleteComment(rowNumber, commentIndex) {
   if (commentIndex === undefined || commentIndex === null) throw new Error('Missing commentIndex');
 
   const currentRow = await sheetsClient.getRow(rowNumber);
-  let comments = [];
-  
-  const currentContent = currentRow[6] || '';
-  if (currentContent) {
-    if (currentContent.trim().startsWith('[') && currentContent.trim().endsWith(']')) {
-      try {
-        comments = JSON.parse(currentContent);
-        if (!Array.isArray(comments)) comments = [];
-      } catch (e) {
-        comments = [];
-      }
-    }
-  }
+  let comments = parseComments(currentRow[7] || '');
 
   if (commentIndex >= 0 && commentIndex < comments.length) {
     comments.splice(commentIndex, 1);
-    await sheetsClient.updateCell(rowNumber, 'G', JSON.stringify(comments));
+    await sheetsClient.updateCell(rowNumber, 'H', JSON.stringify(comments));
     return { success: true, message: 'Deleted comment!', comments };
   } else {
     return { success: false, message: 'Invalid comment index' };
