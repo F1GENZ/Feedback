@@ -6,6 +6,32 @@ const SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
 const SHEET_ID = process.env.SHEET_ID;
 const SHEET_NAME = 'Feedback';
 
+const MAX_RETRIES = 3;
+const BASE_DELAY_MS = 1000;
+
+/**
+ * Retry wrapper for Google API calls that may fail with transient 500/503 errors.
+ * Uses exponential backoff: 1s, 2s, 4s
+ */
+async function withRetry(fn, label = 'API call') {
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      const status = error?.code || error?.response?.status;
+      const isRetryable = [500, 503, 429].includes(status);
+
+      if (isRetryable && attempt < MAX_RETRIES) {
+        const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1);
+        console.warn(`[Retry] ${label} failed (HTTP ${status}), attempt ${attempt}/${MAX_RETRIES}. Retrying in ${delay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      } else {
+        throw error;
+      }
+    }
+  }
+}
+
 class SheetsClient {
   constructor() {
     const authOptions = {
@@ -29,22 +55,20 @@ class SheetsClient {
   }
 
   async getAllData() {
-    try {
+    return withRetry(async () => {
       const response = await this.sheets.spreadsheets.values.get({
         spreadsheetId: SHEET_ID,
-        range: SHEET_NAME, // Read entire sheet
+        range: SHEET_NAME,
       });
 
       const data = response.data.values || [];
       if (data.length < 3) return { headers: [], rows: [] };
 
-      // Row 1 & 2 are headers (indices 0, 1) in Code.gs logic
       const headers = data[0]; 
       const rowsRaw = data.slice(2); 
 
-      // Map rows roughly matching Code.gs logic
       const rows = rowsRaw.map((row, index) => ({
-        rowNumber: index + 3, // 1-based index, skipping 2 header rows
+        rowNumber: index + 3,
         deadline: row[0] || '',
         host: row[1] || '',
         shop: row[2] || '',
@@ -63,29 +87,22 @@ class SheetsClient {
       })).filter(row => row.shop || row.host);
 
       return { headers, rows };
-    } catch (error) {
-      console.error('SheetsClient: getAllData Error:', error);
-      throw error;
-    }
+    }, 'getAllData');
   }
 
   async getRow(rowNumber) {
-    try {
+    return withRetry(async () => {
       const range = `${SHEET_NAME}!A${rowNumber}:O${rowNumber}`;
       const response = await this.sheets.spreadsheets.values.get({
         spreadsheetId: SHEET_ID,
         range: range,
       });
       return response.data.values ? response.data.values[0] : [];
-    } catch (error) {
-      console.error('SheetsClient: getRow Error:', error);
-      throw error;
-    }
+    }, `getRow(${rowNumber})`);
   }
 
   async appendRow(rowArray) {
-    // rowArray should match the columns order A-N
-    try {
+    return withRetry(async () => {
       await this.sheets.spreadsheets.values.append({
         spreadsheetId: SHEET_ID,
         range: SHEET_NAME,
@@ -93,15 +110,11 @@ class SheetsClient {
         resource: { values: [rowArray] },
       });
       return true;
-    } catch (error) {
-      console.error('SheetsClient: appendRow Error:', error);
-      throw error;
-    }
+    }, 'appendRow');
   }
 
   async updateRow(rowNumber, rowArray) {
-    // rowNumber is 1-based
-    try {
+    return withRetry(async () => {
       const range = `${SHEET_NAME}!A${rowNumber}:O${rowNumber}`;
       await this.sheets.spreadsheets.values.update({
         spreadsheetId: SHEET_ID,
@@ -110,14 +123,11 @@ class SheetsClient {
         resource: { values: [rowArray] },
       });
       return true;
-    } catch (error) {
-      console.error('SheetsClient: updateRow Error:', error);
-      throw error;
-    }
+    }, `updateRow(${rowNumber})`);
   }
 
   async updateCell(rowNumber, colLetter, value) {
-    try {
+    return withRetry(async () => {
       const range = `${SHEET_NAME}!${colLetter}${rowNumber}`;
       await this.sheets.spreadsheets.values.update({
         spreadsheetId: SHEET_ID,
@@ -126,22 +136,17 @@ class SheetsClient {
         resource: { values: [[value]] },
       });
       return true;
-    } catch (error) {
-      console.error('SheetsClient: updateCell Error:', error);
-      throw error;
-    }
+    }, `updateCell(${colLetter}${rowNumber})`);
   }
 
   async deleteRow(rowNumber) {
-    try {
-      // Get sheet ID first
+    return withRetry(async () => {
       const spreadsheet = await this.sheets.spreadsheets.get({
         spreadsheetId: SHEET_ID,
       });
       const sheet = spreadsheet.data.sheets.find(s => s.properties.title === SHEET_NAME);
       const sheetId = sheet.properties.sheetId;
 
-      // Delete row using batchUpdate
       await this.sheets.spreadsheets.batchUpdate({
         spreadsheetId: SHEET_ID,
         resource: {
@@ -150,7 +155,7 @@ class SheetsClient {
               range: {
                 sheetId: sheetId,
                 dimension: 'ROWS',
-                startIndex: rowNumber - 1, // 0-based
+                startIndex: rowNumber - 1,
                 endIndex: rowNumber
               }
             }
@@ -158,14 +163,11 @@ class SheetsClient {
         }
       });
       return true;
-    } catch (error) {
-      console.error('SheetsClient: deleteRow Error:', error);
-      throw error;
-    }
+    }, `deleteRow(${rowNumber})`);
   }
 
   async getGuidesData() {
-    try {
+    return withRetry(async () => {
       const response = await this.sheets.spreadsheets.values.get({
         spreadsheetId: SHEET_ID,
         range: 'Intruction',
@@ -174,10 +176,8 @@ class SheetsClient {
       const data = response.data.values || [];
       if (data.length < 2) return { rows: [] };
 
-      // Row 1 is header
       const rowsRaw = data.slice(1);
 
-      // Map rows: Type, Template, Link, App
       const rows = rowsRaw.map((row, index) => ({
         rowNumber: index + 2,
         type: row[0] || '',
@@ -187,14 +187,11 @@ class SheetsClient {
       })).filter(row => row.template || row.link);
 
       return { rows };
-    } catch (error) {
-      console.error('SheetsClient: getGuidesData Error:', error);
-      throw error;
-    }
+    }, 'getGuidesData');
   }
 
   async appendGuideRow(rowArray) {
-    try {
+    return withRetry(async () => {
       await this.sheets.spreadsheets.values.append({
         spreadsheetId: SHEET_ID,
         range: 'Intruction',
@@ -202,14 +199,11 @@ class SheetsClient {
         resource: { values: [rowArray] },
       });
       return true;
-    } catch (error) {
-      console.error('SheetsClient: appendGuideRow Error:', error);
-      throw error;
-    }
+    }, 'appendGuideRow');
   }
 
   async updateGuideRow(rowNumber, rowArray) {
-    try {
+    return withRetry(async () => {
       const range = `Intruction!A${rowNumber}:D${rowNumber}`;
       await this.sheets.spreadsheets.values.update({
         spreadsheetId: SHEET_ID,
@@ -218,14 +212,11 @@ class SheetsClient {
         resource: { values: [rowArray] },
       });
       return true;
-    } catch (error) {
-      console.error('SheetsClient: updateGuideRow Error:', error);
-      throw error;
-    }
+    }, `updateGuideRow(${rowNumber})`);
   }
 
   async deleteGuideRow(rowNumber) {
-    try {
+    return withRetry(async () => {
       const spreadsheet = await this.sheets.spreadsheets.get({
         spreadsheetId: SHEET_ID,
       });
@@ -251,10 +242,7 @@ class SheetsClient {
         }
       });
       return true;
-    } catch (error) {
-      console.error('SheetsClient: deleteGuideRow Error:', error);
-      throw error;
-    }
+    }, `deleteGuideRow(${rowNumber})`);
   }
 
   // --- HISTORY LOG ---
@@ -271,13 +259,12 @@ class SheetsClient {
       return true;
     } catch (error) {
       console.error('SheetsClient: logHistory Error:', error);
-      // Don't throw - logging should not break main operations
       return false;
     }
   }
 
   async getHistoryData() {
-    try {
+    return withRetry(async () => {
       const response = await this.sheets.spreadsheets.values.get({
         spreadsheetId: SHEET_ID,
         range: 'History',
@@ -286,19 +273,15 @@ class SheetsClient {
       const data = response.data.values || [];
       if (data.length < 1) return { rows: [] };
 
-      // Assume first row is header or data starts from row 1
       const rows = data.map((row, index) => ({
         rowNumber: index + 1,
         time: row[0] || '',
         action: row[1] || '',
         content: row[2] || ''
-      })).reverse(); // Latest first
+      })).reverse();
 
       return { rows };
-    } catch (error) {
-      console.error('SheetsClient: getHistoryData Error:', error);
-      throw error;
-    }
+    }, 'getHistoryData');
   }
 }
 
