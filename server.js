@@ -350,9 +350,9 @@ app.post('/api/telegram-webhook', async (req, res) => {
         let note = fb.note || fb.message || '';
         if (note.length > 500) note = note.substring(0, 500) + '...';
         
-        let caption = `• ID: #${fb.rowNumber}\n`;
+        let caption = hasHotTag(fb) ? `🔥🔥🔥 HOT 🔥🔥🔥\n` : '';
+        caption += `• ID: #${fb.rowNumber}\n`;
         caption += `• Shop: ${shop}\n`;
-        if (hasHotTag(fb)) caption += `🔥🔥🔥 HOT 🔥🔥🔥\n`;
         caption += `• File: ${fb.link || 'KHÔNG có file'}`;
         if (note) caption += `\n• Note: ${note}`;
         
@@ -443,9 +443,9 @@ app.post('/api/telegram-webhook', async (req, res) => {
                 let noteText = fb.note || fb.message || '';
                 if (noteText.length > 500) noteText = noteText.substring(0, 500) + '... (quá dài, xem trên Dashboard)';
                 
-                let caption = `• ID: #${fb.rowNumber}\n`;
+                let caption = hasHotTag(fb) ? `🔥🔥🔥 HOT 🔥🔥🔥\n` : '';
+                caption += `• ID: #${fb.rowNumber}\n`;
                 caption += `• Shop: ${shopName}\n`;
-                if (hasHotTag(fb)) caption += `🔥🔥🔥 HOT 🔥🔥🔥\n`;
                 caption += `• File: ${fb.link || 'KHÔNG có file'}`;
                 if (noteText) caption += `\n• Note: ${noteText}`;
                 
