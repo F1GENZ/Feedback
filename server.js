@@ -122,6 +122,12 @@ function sortFeedbackByPriority(rows) {
   });
 }
 
+function hasHotTag(row) {
+  return String(row.tags || '')
+    .split(/[,\s]+/)
+    .some(tag => tag.trim().toLowerCase() === 'hot');
+}
+
 async function cleanupOldDoneFeedbacks(rows, force = false) {
   const now = Date.now();
   if (!force && now - _lastDoneCleanupTime < DONE_CLEANUP_INTERVAL_MS) return 0;
@@ -162,7 +168,7 @@ async function runDoneCleanupJob() {
 // ==================== SMART PARSING CONSTANTS ====================
 const VALID_DOMAINS = ['.com', '.vn', '.com.vn', '.myharavan.com', '.mysapo.net', '.net', '.asia', '.org', '.group', '.top', '.online'];
 const LINK_FEEDBACK_FORMATS = ['docs.google.com', 'drive.google.com', 'onedrive.live.com', 'figma.com', 'canva.com', 'trello.com'];
-const TAGS_LIST = ['hrv', 'haravan', 'gap', 'note', 'baogia', 'sapo'];
+const TAGS_LIST = ['hrv', 'haravan', 'gap', 'note', 'baogia', 'sapo', 'hot'];
 const HOST_ALIAS_MAP = {
   'quoc': 'Quốc', 'quốc': 'Quốc',
   'taiz': 'Taiz', 'tai': 'Taiz', 'tài': 'Taiz',
@@ -346,6 +352,7 @@ app.post('/api/telegram-webhook', async (req, res) => {
         
         let caption = `• ID: #${fb.rowNumber}\n`;
         caption += `• Shop: ${shop}\n`;
+        if (hasHotTag(fb)) caption += `• Hot: HOT\n`;
         caption += `• File: ${fb.link || 'KHÔNG có file'}`;
         if (note) caption += `\n• Note: ${note}`;
         
@@ -438,6 +445,7 @@ app.post('/api/telegram-webhook', async (req, res) => {
                 
                 let caption = `• ID: #${fb.rowNumber}\n`;
                 caption += `• Shop: ${shopName}\n`;
+                if (hasHotTag(fb)) caption += `• Hot: HOT\n`;
                 caption += `• File: ${fb.link || 'KHÔNG có file'}`;
                 if (noteText) caption += `\n• Note: ${noteText}`;
                 
