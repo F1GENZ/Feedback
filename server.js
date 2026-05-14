@@ -352,7 +352,7 @@ app.post('/api/telegram-webhook', async (req, res) => {
         
         let caption = `• ID: #${fb.rowNumber}\n`;
         caption += `• Shop: ${shop}\n`;
-        if (hasHotTag(fb)) caption += `• Hot: HOT\n`;
+        if (hasHotTag(fb)) caption += `🔥🔥🔥 HOT 🔥🔥🔥\n`;
         caption += `• File: ${fb.link || 'KHÔNG có file'}`;
         if (note) caption += `\n• Note: ${note}`;
         
@@ -445,7 +445,7 @@ app.post('/api/telegram-webhook', async (req, res) => {
                 
                 let caption = `• ID: #${fb.rowNumber}\n`;
                 caption += `• Shop: ${shopName}\n`;
-                if (hasHotTag(fb)) caption += `• Hot: HOT\n`;
+                if (hasHotTag(fb)) caption += `🔥🔥🔥 HOT 🔥🔥🔥\n`;
                 caption += `• File: ${fb.link || 'KHÔNG có file'}`;
                 if (noteText) caption += `\n• Note: ${noteText}`;
                 
