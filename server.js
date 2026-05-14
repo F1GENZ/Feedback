@@ -108,6 +108,20 @@ function parseVNTimestamp(value) {
   return new Date(Number(yyyy), Number(mo) - 1, Number(dd), Number(hh), Number(mm), Number(ss)).getTime();
 }
 
+function getPriorityValue(row) {
+  const priority = parseInt(row.priority, 10);
+  return Number.isNaN(priority) ? 999999 : priority;
+}
+
+function sortFeedbackByPriority(rows) {
+  return [...rows].sort((a, b) => {
+    const pa = getPriorityValue(a);
+    const pb = getPriorityValue(b);
+    if (pa !== pb) return pa - pb;
+    return parseVNTimestamp(b.time) - parseVNTimestamp(a.time);
+  });
+}
+
 async function cleanupOldDoneFeedbacks(rows, force = false) {
   const now = Date.now();
   if (!force && now - _lastDoneCleanupTime < DONE_CLEANUP_INTERVAL_MS) return 0;
@@ -310,6 +324,7 @@ app.post('/api/telegram-webhook', async (req, res) => {
         // // without keyword → own feedbacks
         filtered = rows.filter(r => r.host === currentUserHost && r.stage === 'Feedback');
       }
+      filtered = sortFeedbackByPriority(filtered);
       
       const MAX_ITEMS = 20;
       if (filtered.length === 0) {
@@ -318,8 +333,8 @@ app.post('/api/telegram-webhook', async (req, res) => {
       }
       
       if (filtered.length > MAX_ITEMS) {
-        await sendTelegramMessage(chatId, `📊 Hiện ${MAX_ITEMS}/${filtered.length} feedback (mới nhất)`);
-        filtered = filtered.slice(-MAX_ITEMS);
+        await sendTelegramMessage(chatId, `📊 Hiện ${MAX_ITEMS}/${filtered.length} feedback ưu tiên`);
+        filtered = filtered.slice(0, MAX_ITEMS);
       }
       
       telegramRequest(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendChatAction`, { chat_id: chatId, action: 'typing' });
@@ -407,9 +422,9 @@ app.post('/api/telegram-webhook', async (req, res) => {
             // Auto-refresh: send remaining feedbacks
             const data = await sheetsClient.getAllData();
             const rows = data.rows || [];
-            const remainingFeedbacks = rows.filter(r => 
+            const remainingFeedbacks = sortFeedbackByPriority(rows.filter(r => 
               r.host === TELEGRAM_ID_TO_HOST[userId] && r.stage === 'Feedback'
-            );
+            ));
             
             
             if (remainingFeedbacks.length > 0) {
