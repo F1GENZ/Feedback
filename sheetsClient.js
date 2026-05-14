@@ -42,7 +42,7 @@ class SheetsClient {
       const headers = data[0]; 
       const rowsRaw = data.slice(2); 
 
-      // Map rows - Column order: A:ID, B:Deadline, C:Host, D:Shop, E:Link, F:Stage, G:Tags, H:Dev_note, I:Image_note, J:Note, K:Time, L:Message, M:MessageID, N:ImageID, O:UpdatedAt
+      // Map rows - Column order: A:ID, B:Deadline, C:Host, D:Shop, E:Link, F:Stage, G:Tags, H:Dev_note, I:Image_note, J:Note, K:Time, L:Message, M:MessageID, N:ImageID, O:UpdatedAt, P:Priority
       const rows = rowsRaw.map((row, index) => ({
         rowNumber: index + 3, // 1-based index, skipping 2 header rows
         id: row[0] || '',
@@ -59,7 +59,8 @@ class SheetsClient {
         message: row[11] || '',
         messageId: row[12] || '',
         imageId: row[13] || '',
-        updatedAt: row[14] || ''
+        updatedAt: row[14] || '',
+        priority: row[15] || ''
       })).filter(row => row.shop || row.host);
 
       return { headers, rows };
@@ -71,7 +72,7 @@ class SheetsClient {
 
   async getRow(rowNumber) {
     try {
-      const range = `${SHEET_NAME}!A${rowNumber}:O${rowNumber}`;
+      const range = `${SHEET_NAME}!A${rowNumber}:P${rowNumber}`;
       const response = await this.sheets.spreadsheets.values.get({
         spreadsheetId: SHEET_ID,
         range: range,
@@ -102,7 +103,7 @@ class SheetsClient {
   async updateRow(rowNumber, rowArray) {
     // rowNumber is 1-based
     try {
-      const range = `${SHEET_NAME}!A${rowNumber}:O${rowNumber}`;
+      const range = `${SHEET_NAME}!A${rowNumber}:P${rowNumber}`;
       await this.sheets.spreadsheets.values.update({
         spreadsheetId: SHEET_ID,
         range: range,

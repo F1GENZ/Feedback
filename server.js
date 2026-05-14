@@ -82,6 +82,9 @@ function getS3Client() {
 let _dataCache = null;
 let _dataCacheTime = 0;
 const DATA_CACHE_TTL = 10000; // 10 seconds
+const DONE_AUTO_DELETE_AFTER_DAYS = 30;
+let _lastDoneCleanupTime = 0;
+const DONE_CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 
 async function getCachedData(forceRefresh = false) {
   if (!forceRefresh && _dataCache && (Date.now() - _dataCacheTime < DATA_CACHE_TTL)) {
@@ -95,6 +98,50 @@ async function getCachedData(forceRefresh = false) {
 function invalidateDataCache() {
   _dataCache = null;
   _dataCacheTime = 0;
+}
+
+function parseVNTimestamp(value) {
+  if (!value) return 0;
+  const match = String(value).match(/(?:(\d{1,2}):(\d{2})(?::(\d{2}))?\s+)?(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (!match) return 0;
+  const [, hh = '0', mm = '0', ss = '0', dd, mo, yyyy] = match;
+  return new Date(Number(yyyy), Number(mo) - 1, Number(dd), Number(hh), Number(mm), Number(ss)).getTime();
+}
+
+async function cleanupOldDoneFeedbacks(rows, force = false) {
+  const now = Date.now();
+  if (!force && now - _lastDoneCleanupTime < DONE_CLEANUP_INTERVAL_MS) return 0;
+  _lastDoneCleanupTime = now;
+
+  const cutoff = now - DONE_AUTO_DELETE_AFTER_DAYS * 24 * 60 * 60 * 1000;
+  const rowsToDelete = rows
+    .filter(row => row.stage === 'Done')
+    .filter(row => {
+      const doneTime = parseVNTimestamp(row.updatedAt || row.time);
+      return doneTime > 0 && doneTime < cutoff;
+    })
+    .map(row => row.rowNumber)
+    .sort((a, b) => b - a);
+
+  for (const rowNumber of rowsToDelete) {
+    await sheetsClient.deleteRow(rowNumber);
+  }
+
+  if (rowsToDelete.length > 0) {
+    invalidateDataCache();
+    console.log(`[Cleanup] Deleted ${rowsToDelete.length} Done feedback older than ${DONE_AUTO_DELETE_AFTER_DAYS} days`);
+  }
+
+  return rowsToDelete.length;
+}
+
+async function runDoneCleanupJob() {
+  try {
+    const data = await sheetsClient.getAllData();
+    await cleanupOldDoneFeedbacks(data.rows || [], true);
+  } catch (error) {
+    console.error('[Cleanup] Done feedback cleanup failed:', error);
+  }
 }
 
 
@@ -826,6 +873,9 @@ app.post('/api/exec', async (req, res) => {
       case 'bulkDelete':
         result = await bulkDelete(req.body.rowNumbers);
         break;
+      case 'updateFeedbackPriority':
+        result = await updateFeedbackPriority(req.body.orderedRowNumbers);
+        break;
       case 'addComment':
         result = await addComment(req.body.rowNumber, req.body.commentText);
         break;
@@ -969,8 +1019,14 @@ app.get('/api/telegram-image', async (req, res) => {
 // Helper Functions
 
 async function getDashboardData() {
-  const data = await getCachedData();
-  const rows = data.rows || [];
+  let data = await getCachedData();
+  let rows = data.rows || [];
+
+  const deletedDoneRows = await cleanupOldDoneFeedbacks(rows);
+  if (deletedDoneRows > 0) {
+    data = await getCachedData(true);
+    rows = data.rows || [];
+  }
 
   // Calculate stats
   const hostStats = {};
@@ -1050,7 +1106,8 @@ async function createFeedback(feedback) {
     feedback.note || '',            // Message (copy of note for now)
     '',                             // MessageID
     '',                             // ImageID
-    timestamp                       // UpdatedAt
+    timestamp,                      // UpdatedAt
+    ''                              // Priority
   ];
 
   const success = await sheetsClient.appendRow(row);
@@ -1076,12 +1133,12 @@ async function updateFeedback(rowNumber, updates) {
   if (!currentRowRaw) throw new Error('Row not found');
   
   // Merge logic
-  // Columns: A-O (0-14)
-  // A:ID, B:Deadline, C:Host, D:Shop, E:Link, F:Stage, G:Tags, H:Dev, I:ImgN, J:Note, K:Time, L:Msg, M:MsgID, N:ImgID, O:UpdatedAt
+  // Columns: A-P (0-15)
+  // A:ID, B:Deadline, C:Host, D:Shop, E:Link, F:Stage, G:Tags, H:Dev, I:ImgN, J:Note, K:Time, L:Msg, M:MsgID, N:ImgID, O:UpdatedAt, P:Priority
   
   const newRow = [...currentRowRaw];
-  // Ensure we have enough empty strings (15 columns: A-O)
-  while(newRow.length < 15) newRow.push('');
+  // Ensure we have enough empty strings (16 columns: A-P)
+  while(newRow.length < 16) newRow.push('');
   
   // Keep ID (0) same
   if (updates.deadline !== undefined) newRow[1] = updates.deadline;
@@ -1173,6 +1230,36 @@ async function bulkDelete(rowNumbers) {
   }
 
   return { success: true, message: `Đã xóa ${rowNumbers.length} mục` };
+}
+
+async function updateFeedbackPriority(orderedRowNumbers) {
+  if (!orderedRowNumbers || !Array.isArray(orderedRowNumbers) || orderedRowNumbers.length === 0) {
+    throw new Error('Missing or invalid orderedRowNumbers');
+  }
+
+  const normalizedOrdered = [...new Set(orderedRowNumbers.map(n => parseInt(n, 10)).filter(Number.isInteger))];
+  if (normalizedOrdered.length === 0) throw new Error('No valid row numbers');
+
+  const data = await sheetsClient.getAllData();
+  const rows = data.rows || [];
+  const orderedSet = new Set(normalizedOrdered);
+  const rest = rows
+    .filter(row => !orderedSet.has(row.rowNumber))
+    .sort((a, b) => {
+      const pa = parseInt(a.priority, 10);
+      const pb = parseInt(b.priority, 10);
+      if (!Number.isNaN(pa) || !Number.isNaN(pb)) return (Number.isNaN(pa) ? 999999 : pa) - (Number.isNaN(pb) ? 999999 : pb);
+      return parseVNTimestamp(b.time) - parseVNTimestamp(a.time);
+    })
+    .map(row => row.rowNumber);
+
+  const fullOrder = [...normalizedOrdered, ...rest];
+  for (let i = 0; i < fullOrder.length; i++) {
+    await sheetsClient.updateCell(fullOrder[i], 'P', i + 1);
+  }
+
+  invalidateDataCache();
+  return { success: true, message: 'Saved priority order!' };
 }
 
 // ==================== COMMENTS ====================
@@ -1290,4 +1377,6 @@ async function deleteGuide(rowNumber) {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  setTimeout(runDoneCleanupJob, 10 * 1000);
+  setInterval(runDoneCleanupJob, DONE_CLEANUP_INTERVAL_MS);
 });
