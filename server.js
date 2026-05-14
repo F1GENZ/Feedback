@@ -125,7 +125,7 @@ function sortFeedbackByPriority(rows) {
 function hasHotTag(row) {
   return String(row.tags || '')
     .split(/[,\s]+/)
-    .some(tag => tag.trim().toLowerCase() === 'hot');
+    .some(tag => ['hot', 'gap'].includes(tag.trim().toLowerCase()));
 }
 
 async function cleanupOldDoneFeedbacks(rows, force = false) {
