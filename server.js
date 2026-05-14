@@ -1254,9 +1254,13 @@ async function updateFeedbackPriority(orderedRowNumbers) {
     .map(row => row.rowNumber);
 
   const fullOrder = [...normalizedOrdered, ...rest];
-  for (let i = 0; i < fullOrder.length; i++) {
-    await sheetsClient.updateCell(fullOrder[i], 'P', i + 1);
-  }
+  await sheetsClient.batchUpdateCells(
+    fullOrder.map((rowNumber, index) => ({
+      rowNumber,
+      colLetter: 'P',
+      value: index + 1
+    }))
+  );
 
   invalidateDataCache();
   return { success: true, message: 'Saved priority order!' };

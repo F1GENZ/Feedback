@@ -133,6 +133,26 @@ class SheetsClient {
     }
   }
 
+  async batchUpdateCells(updates) {
+    try {
+      if (!updates || updates.length === 0) return true;
+      await this.sheets.spreadsheets.values.batchUpdate({
+        spreadsheetId: SHEET_ID,
+        resource: {
+          valueInputOption: 'USER_ENTERED',
+          data: updates.map(update => ({
+            range: `${SHEET_NAME}!${update.colLetter}${update.rowNumber}`,
+            values: [[update.value]]
+          }))
+        },
+      });
+      return true;
+    } catch (error) {
+      console.error('SheetsClient: batchUpdateCells Error:', error);
+      throw error;
+    }
+  }
+
   async deleteRow(rowNumber) {
     try {
       // Get sheet ID first
