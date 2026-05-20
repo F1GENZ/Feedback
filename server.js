@@ -85,6 +85,7 @@ const DATA_CACHE_TTL = 10000; // 10 seconds
 const DONE_AUTO_DELETE_AFTER_DAYS = 30;
 let _lastDoneCleanupTime = 0;
 const DONE_CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+const OVERDUE_CHECK_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 
 async function getCachedData(forceRefresh = false) {
   if (!forceRefresh && _dataCache && (Date.now() - _dataCacheTime < DATA_CACHE_TTL)) {
@@ -108,6 +109,30 @@ function parseVNTimestamp(value) {
   return new Date(Number(yyyy), Number(mo) - 1, Number(dd), Number(hh), Number(mm), Number(ss)).getTime();
 }
 
+function formatTodayDateInput() {
+  const vn = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' }));
+  const y = vn.getFullYear();
+  const m = (vn.getMonth() + 1).toString().padStart(2, '0');
+  const d = vn.getDate().toString().padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function parseDeadlineDate(value) {
+  if (!value) return 0;
+  const raw = String(value).trim();
+  let match = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (match) return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3])).getTime();
+
+  match = raw.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (match) return new Date(Number(match[3]), Number(match[2]) - 1, Number(match[1])).getTime();
+
+  return 0;
+}
+
+function getTodayStartTime() {
+  return parseDeadlineDate(formatTodayDateInput());
+}
+
 function getPriorityValue(row) {
   const priority = parseInt(row.priority, 10);
   return Number.isNaN(priority) ? 999999 : priority;
@@ -125,7 +150,59 @@ function sortFeedbackByPriority(rows) {
 function hasHotTag(row) {
   return String(row.tags || '')
     .split(/[,\s]+/)
-    .some(tag => ['hot', 'gap'].includes(tag.trim().toLowerCase()));
+    .some(tag => normalizeTagToken(tag) === 'gap');
+}
+
+function normalizeText(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/đ/g, 'd');
+}
+
+function normalizeTagToken(value) {
+  const normalized = normalizeText(value);
+  if (normalized === 'gap' || normalized === 'hot') return 'gap';
+  return normalized;
+}
+
+function normalizeTags(tags) {
+  return [...new Set(String(tags || '')
+    .split(/[,\s]+/)
+    .map(normalizeTagToken)
+    .filter(tag => TAGS_LIST.includes(tag)))]
+    .join(', ');
+}
+
+function hasUrgentTag(row) {
+  return String(row.tags || '')
+    .split(/[,\s]+/)
+    .map(normalizeTagToken)
+    .some(tag => tag === 'gap');
+}
+
+function addUrgentTag(tags) {
+  const normalized = normalizeTags(tags);
+  const parts = normalized ? normalized.split(',').map(t => t.trim()).filter(Boolean) : [];
+  if (!parts.includes('gap')) parts.push('gap');
+  return parts.join(', ');
+}
+
+function getAvailableHosts(rows = []) {
+  const hosts = [...Object.values(TELEGRAM_ID_TO_HOST), ...rows.map(row => row.host).filter(Boolean)];
+  return [...new Set(hosts)].filter(Boolean);
+}
+
+function resolveHostName(input, rows = []) {
+  const wanted = normalizeText(input);
+  if (!wanted) return '';
+
+  const alias = Object.entries(HOST_ALIAS_MAP).find(([key]) => normalizeText(key) === wanted);
+  if (alias) return alias[1];
+
+  return getAvailableHosts(rows).find(host => normalizeText(host) === wanted) || '';
 }
 
 async function cleanupOldDoneFeedbacks(rows, force = false) {
@@ -164,9 +241,47 @@ async function runDoneCleanupJob() {
   }
 }
 
+async function runOverdueFeedbackJob() {
+  try {
+    const data = await sheetsClient.getAllData();
+    const todayStart = getTodayStartTime();
+    const overdueRows = (data.rows || []).filter(row => {
+      if (row.stage !== 'Feedback') return false;
+      if (hasUrgentTag(row)) return false;
+      const deadlineTime = parseDeadlineDate(row.deadline);
+      return deadlineTime > 0 && deadlineTime < todayStart;
+    });
+
+    if (overdueRows.length === 0) return;
+
+    const timestamp = formatVNTimestamp();
+    const updates = [];
+    overdueRows.forEach(row => {
+      updates.push({ rowNumber: row.rowNumber, colLetter: 'G', value: addUrgentTag(row.tags) });
+      updates.push({ rowNumber: row.rowNumber, colLetter: 'O', value: timestamp });
+    });
+
+    await sheetsClient.batchUpdateCells(updates);
+    invalidateDataCache();
+
+    const groupChatId = process.env.TELEGRAM_GROUP_CHAT_ID;
+    if (groupChatId) {
+      const lines = overdueRows.slice(0, 10).map(row => `#${row.rowNumber} ${row.host || '-'} - ${row.shop || 'N/A'}`);
+      const more = overdueRows.length > 10 ? `\n...và ${overdueRows.length - 10} feedback khác` : '';
+      await sendTelegramMessage(
+        groupChatId,
+        `🔥 ${overdueRows.length} feedback quá deadline đã gắn tag Gấp:\n${lines.join('\n')}${more}`,
+        { disable_web_page_preview: true }
+      );
+    }
+  } catch (error) {
+    console.error('[Deadline] Overdue feedback job failed:', error);
+  }
+}
+
 
 // ==================== SMART PARSING CONSTANTS ====================
-const VALID_DOMAINS = ['.com', '.vn', '.com.vn', '.myharavan.com', '.mysapo.net', '.net', '.asia', '.org', '.group', '.top', '.online'];
+const VALID_DOMAINS = ['.com', '.vn', '.com.vn', '.myharavan.com', '.mysapo.net', '.net', '.asia', '.org', '.group', '.top', '.online', '.dev'];
 const LINK_FEEDBACK_FORMATS = ['docs.google.com', 'drive.google.com', 'onedrive.live.com', 'figma.com', 'canva.com', 'trello.com'];
 const TAGS_LIST = ['hrv', 'haravan', 'gap', 'note', 'baogia', 'sapo', 'hot'];
 const HOST_ALIAS_MAP = {
@@ -200,7 +315,7 @@ function parseMessageContent(text, firstName) {
   const host = [...new Set(hostMatch)].join(';');
 
   // Tags
-  const tags = [...new Set(cleaned.split(/[\s,]+/).filter(w => TAGS_LIST.includes(w.toLowerCase())).map(t => t.toLowerCase()))].join(', ');
+  const tags = normalizeTags(cleaned);
 
   // Note: remaining text after removing bare domain URLs, host, tags
   // Keep URLs that have path or query; remove bare domains only
@@ -220,7 +335,7 @@ function parseMessageContent(text, firstName) {
     }
   });
   hostMatch.forEach(h => { content = content.replace(new RegExp(`\\b${h}\\b`, 'gi'), '').trim(); });
-  cleaned.split(/[\s,]+/).filter(w => TAGS_LIST.includes(w.toLowerCase())).forEach(t => { content = content.replace(new RegExp(`\\b${t}\\b`, 'gi'), '').trim(); });
+  cleaned.split(/[\s,]+/).filter(w => TAGS_LIST.includes(normalizeTagToken(w))).forEach(t => { content = content.replace(new RegExp(`\\b${t}\\b`, 'gi'), '').trim(); });
   content = content.replace(/[.,;]{2,}/g, ' ').replace(/\s+/g, ' ').trim();
 
   return { shop, link, host, tags, note: content, message };
@@ -230,9 +345,10 @@ async function handleCreateFromTelegram(chatId, firstName, text, photoId, userId
   try {
     const parsed = parseMessageContent(text || '', firstName);
     const ts = formatVNTimestamp();
+    const deadline = hasUrgentTag({ tags: parsed.tags }) ? formatTodayDateInput() : '';
 
     const row = [
-      Date.now().toString(), '', parsed.host, parsed.shop, parsed.link,
+      Date.now().toString(), deadline, parsed.host, parsed.shop, parsed.link,
       'Feedback', parsed.tags, '', '', parsed.note,
       ts, parsed.message, userId, photoId || '', ''
     ];
@@ -306,7 +422,7 @@ app.post('/api/telegram-webhook', async (req, res) => {
     }
     
     // Handle // command - Read feedbacks (//, // all, // Tên, // shop)
-    if (text === '//' || text.startsWith('// ')) {
+    if (!message.reply_to_message && (text === '//' || text.startsWith('// '))) {
       const keyword = text.startsWith('// ') ? text.substring(3).trim().toLowerCase() : '';
       const isAll = keyword === 'all';
       
@@ -387,6 +503,27 @@ app.post('/api/telegram-webhook', async (req, res) => {
         const lowerText = replyText.toLowerCase();
         
         try {
+          // Reply "// Tên" to move this feedback to another host.
+          if (lowerText.startsWith('//')) {
+            const targetInput = replyText.replace(/^\/\/\s*/, '').trim();
+            const data = await getCachedData(true);
+            const rows = data.rows || [];
+            const targetHost = resolveHostName(targetInput, rows);
+
+            if (!targetHost) {
+              await sendTelegramMessage(chatId, `⚠️ Không tìm thấy host "${targetInput}". Host hiện có: ${getAvailableHosts(rows).join(', ')}`);
+              return res.json({ ok: true });
+            }
+
+            const timestamp = formatVNTimestamp();
+            await sheetsClient.updateCell(rowNumber, 'C', targetHost);
+            await sheetsClient.updateCell(rowNumber, 'O', timestamp);
+            invalidateDataCache();
+            await sendTelegramMessage(chatId, `✅ #${rowNumber} đã chuyển sang ${targetHost}`);
+            if (targetHost) await notifyHostFeedbackCount(targetHost);
+            return res.json({ ok: true });
+          }
+
           // Check if message starts with "Done"
           if (lowerText === 'done' || lowerText.startsWith('done ') || lowerText.startsWith('done-') || lowerText.startsWith('done:')) {
             // Update stage to Done
@@ -917,6 +1054,9 @@ app.post('/api/exec', async (req, res) => {
       case 'deleteComment':
         result = await deleteComment(req.body.rowNumber, req.body.commentIndex);
         break;
+      case 'deleteFeedbackImage':
+        result = await deleteFeedbackImage(req.body.rowNumber);
+        break;
       default:
         result = { success: false, message: 'Unknown action: ' + action };
     }
@@ -1111,17 +1251,19 @@ async function createFeedback(feedback) {
   if (!feedback) throw new Error('No feedback data');
   
   const timestamp = formatVNTimestamp();
+  const tags = normalizeTags(feedback.tags || '');
+  const deadline = hasUrgentTag({ tags }) ? formatTodayDateInput() : (feedback.deadline || '');
   
   // Prepare row data (Columns A-O)
   // A: ID, B: Deadline, C: Host, D: Shop, E: Link, F: Stage, G: Tags, H: Dev_note, I: Image_note, J: Note, K: Time, L: Message, M: MessageID, N: ImageID, O: UpdatedAt
   const row = [
     Date.now().toString(),          // ID (timestamp)
-    feedback.deadline || '',        // Deadline
+    deadline,                       // Deadline
     feedback.host || '',            // Host
     feedback.shop || '',            // Shop
     feedback.link || '',            // Link
     feedback.stage || 'Feedback',   // Stage
-    feedback.tags || '',            // Tags
+    tags,                           // Tags
     feedback.devNote || '',         // Dev_note
     '',                             // Image_note
     feedback.note || '',            // Note
@@ -1174,6 +1316,8 @@ async function updateFeedback(rowNumber, updates) {
   if (updates.note !== undefined) newRow[9] = updates.note;
   if (updates.message !== undefined) newRow[11] = updates.message;
   // Keep Time (10) same
+  newRow[6] = normalizeTags(newRow[6]);
+  if (hasUrgentTag({ tags: newRow[6] })) newRow[1] = formatTodayDateInput();
   
   newRow[14] = formatVNTimestamp();
   
@@ -1358,6 +1502,18 @@ async function deleteComment(rowNumber, commentIndex) {
   }
 }
 
+async function deleteFeedbackImage(rowNumber) {
+  if (!rowNumber) throw new Error('Missing rowNumber');
+
+  await sheetsClient.batchUpdateCells([
+    { rowNumber, colLetter: 'I', value: '' },
+    { rowNumber, colLetter: 'N', value: '' },
+    { rowNumber, colLetter: 'O', value: formatVNTimestamp() }
+  ]);
+  invalidateDataCache();
+  return { success: true, message: 'Deleted feedback image!' };
+}
+
 // ==================== GUIDES CRUD ====================
 
 async function createGuide(guide) {
@@ -1405,5 +1561,7 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   setTimeout(runDoneCleanupJob, 10 * 1000);
+  setTimeout(runOverdueFeedbackJob, 20 * 1000);
   setInterval(runDoneCleanupJob, DONE_CLEANUP_INTERVAL_MS);
+  setInterval(runOverdueFeedbackJob, OVERDUE_CHECK_INTERVAL_MS);
 });
