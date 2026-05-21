@@ -35,6 +35,9 @@ const HOST_TO_TELEGRAM_ID = Object.fromEntries(
 
 // Cache for R2 URLs (to avoid re-uploading same images)
 const imageUrlCache = new Map();
+let r2UploadDisabledUntil = 0;
+let lastR2AuthWarningAt = 0;
+const R2_AUTH_BACKOFF_MS = 10 * 60 * 1000;
 // Helper: Format Vietnam timezone timestamp
 function formatVNTimestamp(format = 'full') {
   const now = new Date();
@@ -76,6 +79,29 @@ function getS3Client() {
     });
   }
   return _s3Client;
+}
+
+function isR2AuthError(error) {
+  const message = String(error?.message || error || '').toLowerCase();
+  const name = String(error?.name || '').toLowerCase();
+  return message.includes('unauthorized') || message.includes('access denied') || name.includes('forbidden');
+}
+
+function shouldSkipR2Upload() {
+  return Date.now() < r2UploadDisabledUntil;
+}
+
+function handleR2UploadError(error, context = 'R2 upload') {
+  if (!isR2AuthError(error)) {
+    console.error(`${context}:`, error.message || error);
+    return;
+  }
+
+  r2UploadDisabledUntil = Date.now() + R2_AUTH_BACKOFF_MS;
+  if (Date.now() - lastR2AuthWarningAt > R2_AUTH_BACKOFF_MS) {
+    lastR2AuthWarningAt = Date.now();
+    console.error(`${context}: Unauthorized. R2 upload paused for ${Math.round(R2_AUTH_BACKOFF_MS / 60000)} minutes. Check CLOUDFLARE_R2_ACCESS_KEY_ID / CLOUDFLARE_R2_SECRET_ACCESS_KEY / bucket permissions.`);
+  }
 }
 
 // In-memory cache for getAllData (reduces Google Sheets API calls)
@@ -772,9 +798,9 @@ async function sendTelegramPhoto(chatId, fileId, caption = '', options = {}, row
     }
     
     // Upload to R2 in background (don't block response) for uncached file_ids
-    if (!fileId.startsWith('http') && !imageUrlCache.has(fileId)) {
+    if (!fileId.startsWith('http') && !imageUrlCache.has(fileId) && !shouldSkipR2Upload()) {
       uploadToR2InBackground(botToken, fileId, rowNumber).catch(err =>
-        console.error('Background R2 upload failed:', err.message)
+        handleR2UploadError(err, '[R2] Background upload failed')
       );
     }
   } catch (error) {
@@ -785,6 +811,8 @@ async function sendTelegramPhoto(chatId, fileId, caption = '', options = {}, row
 
 // Background R2 upload (non-blocking)
 async function uploadToR2InBackground(botToken, fileId, rowNumber) {
+  if (shouldSkipR2Upload()) return;
+
   try {
     const fileResponse = await fetch(`https://api.telegram.org/bot${botToken}/getFile?file_id=${fileId}`);
     const fileData = await fileResponse.json();
@@ -812,7 +840,7 @@ async function uploadToR2InBackground(botToken, fileId, rowNumber) {
       console.log(`[R2] Background upload done: row ${rowNumber} → ${r2Url}`);
     }
   } catch (err) {
-    console.error('[R2] Background upload error:', err.message);
+    handleR2UploadError(err, '[R2] Background upload error');
   }
 }
 
@@ -821,6 +849,9 @@ async function uploadTelegramPhotoToR2(fileId) {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   if (!botToken) {
     return 'Error: Bot token not configured';
+  }
+  if (shouldSkipR2Upload()) {
+    return 'Error: R2 upload temporarily paused due to authorization error';
   }
   
   try {
@@ -860,7 +891,7 @@ async function uploadTelegramPhotoToR2(fileId) {
     // Return CDN URL
     return `${process.env.CLOUDFLARE_CDN_URL}/${filename}`;
   } catch (error) {
-    console.error('Failed to upload to R2:', error);
+    handleR2UploadError(error, 'Failed to upload to R2');
     return 'Error: ' + error.message;
   }
 }
@@ -1135,6 +1166,10 @@ app.get('/api/telegram-image', async (req, res) => {
     
     // Download and upload to R2 for permanent URL
     try {
+      if (shouldSkipR2Upload()) {
+        return res.json({ success: true, url: fileUrl, temporary: true });
+      }
+
       const downloadResponse = await fetch(fileUrl);
       if (downloadResponse.ok) {
         const arrayBuffer = await downloadResponse.arrayBuffer();
@@ -1164,7 +1199,7 @@ app.get('/api/telegram-image', async (req, res) => {
         return res.json({ success: true, url: r2Url });
       }
     } catch (uploadError) {
-      console.error('Failed to upload to R2:', uploadError.message);
+      handleR2UploadError(uploadError, 'Failed to upload to R2');
     }
     
     // Fallback to Telegram URL (temporary)
