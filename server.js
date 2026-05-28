@@ -38,6 +38,7 @@ const imageUrlCache = new Map();
 let r2UploadDisabledUntil = 0;
 let lastR2AuthWarningAt = 0;
 const R2_AUTH_BACKOFF_MS = 10 * 60 * 1000;
+let r2AuthDisabled = false;
 // Helper: Format Vietnam timezone timestamp
 function formatVNTimestamp(format = 'full') {
   const now = new Date();
@@ -88,7 +89,7 @@ function isR2AuthError(error) {
 }
 
 function shouldSkipR2Upload() {
-  return Date.now() < r2UploadDisabledUntil;
+  return r2AuthDisabled || Date.now() < r2UploadDisabledUntil;
 }
 
 function handleR2UploadError(error, context = 'R2 upload') {
@@ -97,10 +98,12 @@ function handleR2UploadError(error, context = 'R2 upload') {
     return;
   }
 
+  if (r2AuthDisabled) return;
+  r2AuthDisabled = true;
   r2UploadDisabledUntil = Date.now() + R2_AUTH_BACKOFF_MS;
   if (Date.now() - lastR2AuthWarningAt > R2_AUTH_BACKOFF_MS) {
     lastR2AuthWarningAt = Date.now();
-    console.error(`${context}: Unauthorized. R2 upload paused for ${Math.round(R2_AUTH_BACKOFF_MS / 60000)} minutes. Check CLOUDFLARE_R2_ACCESS_KEY_ID / CLOUDFLARE_R2_SECRET_ACCESS_KEY / bucket permissions.`);
+    console.error(`${context}: Unauthorized. R2 upload disabled until server restart. Check CLOUDFLARE_R2_ACCESS_KEY_ID / CLOUDFLARE_R2_SECRET_ACCESS_KEY / bucket permissions.`);
   }
 }
 
