@@ -66,6 +66,50 @@ function parseComments(rawString) {
   return [{ text: rawString, time: 'Note cũ', author: 'System' }];
 }
 
+function extractCommentImageUrls(text) {
+  if (!text) return [];
+
+  const urls = [];
+  const markerRegex = /\[IMAGE\]\s*(https?:\/\/\S+)/g;
+  let match;
+  while ((match = markerRegex.exec(text)) !== null) {
+    urls.push(match[1].trim());
+  }
+
+  const urlRegex = /https?:\/\/\S+/g;
+  while ((match = urlRegex.exec(text)) !== null) {
+    const url = match[0].trim();
+    const lower = url.toLowerCase();
+    const looksLikeImage =
+      lower.includes('images.f1genz.dev/') ||
+      lower.includes('api.telegram.org/file/') ||
+      /\.(png|jpe?g|gif|webp)(\?|#|$)/i.test(lower);
+    if (looksLikeImage) urls.push(url);
+  }
+
+  return [...new Set(urls)];
+}
+
+function stripCommentImageData(text) {
+  if (!text) return '';
+  return text
+    .replace(/\[IMAGE\]\s*https?:\/\/\S+/g, '')
+    .replace(/https?:\/\/\S*(?:images\.f1genz\.dev|api\.telegram\.org\/file)\S*/g, '')
+    .replace(/https?:\/\/\S+\.(?:png|jpe?g|gif|webp)(?:\?\S*)?/gi, '')
+    .trim();
+}
+
+function getFeedbackCommentImages(feedback) {
+  const comments = parseComments(feedback.devNote || '');
+  return comments.flatMap(comment => extractCommentImageUrls(comment.text || ''));
+}
+
+function formatTelegramImageComment(firstName, text, imageUrl) {
+  const prefix = `[Telegram] ${firstName}: ${text || ''}`.trim();
+  if (!imageUrl || imageUrl.startsWith('Error:')) return prefix;
+  return `${prefix}\n[IMAGE]${imageUrl}`;
+}
+
 // Singleton S3 client (reused across all uploads)
 let _s3Client = null;
 function getS3Client() {
@@ -491,28 +535,7 @@ app.post('/api/telegram-webhook', async (req, res) => {
       telegramRequest(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendChatAction`, { chat_id: chatId, action: 'typing' });
       
       for (const fb of filtered) {
-        const shop = fb.shop || 'N/A';
-        let note = fb.note || fb.message || '';
-        if (note.length > 500) note = note.substring(0, 500) + '...';
-        
-        let caption = hasHotTag(fb) ? `🔥🔥🔥 HOT 🔥🔥🔥\n` : '';
-        caption += `• ID: #${fb.rowNumber}\n`;
-        caption += `• Shop: ${shop}\n`;
-        caption += `• File: ${fb.link || 'KHÔNG có file'}`;
-        if (note) caption += `\n• Note: ${note}`;
-        
-        try {
-          if (fb.imageId) {
-            await sendTelegramPhoto(chatId, fb.imageId, caption, { disable_web_page_preview: true }, fb.rowNumber);
-          } else {
-            await sendTelegramMessage(chatId, caption, { disable_web_page_preview: true });
-          }
-        } catch (err) {
-          console.error('Send error:', err.message);
-          if (fb.imageId) {
-            await sendTelegramMessage(chatId, caption + '\n\n📷 (Không thể tải ảnh)', { disable_web_page_preview: true }).catch(() => {});
-          }
-        }
+        await sendFeedbackToTelegram(chatId, fb);
       }
       
       return res.json({ ok: true });
@@ -576,12 +599,12 @@ app.post('/api/telegram-webhook', async (req, res) => {
             // Check for document (uncompressed image) first, then photo
             if (message.document && message.document.mime_type && message.document.mime_type.startsWith('image/')) {
               const photoUrl = await uploadTelegramPhotoToR2(message.document.file_id);
-              commentText = `[Telegram] ${firstName}: ${extraText || 'Done'}\n${photoUrl}`;
+              commentText = formatTelegramImageComment(firstName, extraText || 'Done', photoUrl);
             } else if (message.photo && message.photo.length > 0) {
               // Get largest photo (compressed)
               const photo = message.photo[message.photo.length - 1];
               const photoUrl = await uploadTelegramPhotoToR2(photo.file_id);
-              commentText = `[Telegram] ${firstName}: ${extraText || 'Done'}\n${photoUrl}`;
+              commentText = formatTelegramImageComment(firstName, extraText || 'Done', photoUrl);
             } else if (extraText) {
               commentText = `[Telegram] ${firstName}: ${extraText}`;
             }
@@ -605,28 +628,7 @@ app.post('/api/telegram-webhook', async (req, res) => {
               
               // Send messages sequentially to avoid ETIMEDOUT
               for (const fb of remainingFeedbacks) {
-                const shopName = fb.shop || 'N/A';
-                let noteText = fb.note || fb.message || '';
-                if (noteText.length > 500) noteText = noteText.substring(0, 500) + '... (quá dài, xem trên Dashboard)';
-                
-                let caption = hasHotTag(fb) ? `🔥🔥🔥 HOT 🔥🔥🔥\n` : '';
-                caption += `• ID: #${fb.rowNumber}\n`;
-                caption += `• Shop: ${shopName}\n`;
-                caption += `• File: ${fb.link || 'KHÔNG có file'}`;
-                if (noteText) caption += `\n• Note: ${noteText}`;
-                
-                try {
-                  if (fb.imageId) {
-                    await sendTelegramPhoto(chatId, fb.imageId, caption, { disable_web_page_preview: true }, fb.rowNumber);
-                  } else {
-                    await sendTelegramMessage(chatId, caption, { disable_web_page_preview: true });
-                  }
-                } catch (err) {
-                  console.error('Send error:', err.message);
-                  if (fb.imageId) {
-                    await sendTelegramMessage(chatId, caption + '\n\n📷 (Không thể tải ảnh)', { disable_web_page_preview: true }).catch(() => {});
-                  }
-                }
+                await sendFeedbackToTelegram(chatId, fb);
               }
             } else {
               await sendTelegramMessage(chatId, `🎉 Không còn feedback nào!`);
@@ -646,11 +648,11 @@ app.post('/api/telegram-webhook', async (req, res) => {
             // Check for document (uncompressed) first, then photo
             if (message.document && message.document.mime_type && message.document.mime_type.startsWith('image/')) {
               const photoUrl = await uploadTelegramPhotoToR2(message.document.file_id);
-              commentText += `\n${photoUrl}`;
+              commentText = formatTelegramImageComment(firstName, replyText, photoUrl);
             } else if (message.photo && message.photo.length > 0) {
               const photo = message.photo[message.photo.length - 1];
               const photoUrl = await uploadTelegramPhotoToR2(photo.file_id);
-              commentText += `\n${photoUrl}`;
+              commentText = formatTelegramImageComment(firstName, replyText, photoUrl);
             }
             
             await addCommentToFeedback(rowNumber, commentText);
@@ -809,6 +811,47 @@ async function sendTelegramPhoto(chatId, fileId, caption = '', options = {}, row
   } catch (error) {
     console.error('Failed to send Telegram photo:', error);
     throw error;
+  }
+}
+
+function buildFeedbackCaption(fb, noteLimit = 500) {
+  const shop = fb.shop || 'N/A';
+  let note = fb.note || fb.message || '';
+  if (note.length > noteLimit) note = note.substring(0, noteLimit) + '...';
+
+  let caption = hasHotTag(fb) ? `🔥🔥🔥 HOT 🔥🔥🔥\n` : '';
+  caption += `• ID: #${fb.rowNumber}\n`;
+  caption += `• Shop: ${shop}\n`;
+  caption += `• File: ${fb.link || 'KHÔNG có file'}`;
+  if (note) caption += `\n• Note: ${note}`;
+  return caption;
+}
+
+async function sendFeedbackToTelegram(chatId, fb, options = {}) {
+  const caption = buildFeedbackCaption(fb, options.noteLimit || 500);
+  const sendOptions = { disable_web_page_preview: true };
+
+  try {
+    if (fb.imageId) {
+      await sendTelegramPhoto(chatId, fb.imageId, caption, sendOptions, fb.rowNumber);
+    } else {
+      await sendTelegramMessage(chatId, caption, sendOptions);
+    }
+  } catch (err) {
+    console.error('Send error:', err.message);
+    if (fb.imageId) {
+      await sendTelegramMessage(chatId, caption + '\n\n📷 (Không thể tải ảnh)', sendOptions).catch(() => {});
+    }
+  }
+
+  const commentImages = getFeedbackCommentImages(fb);
+  for (let i = 0; i < commentImages.length; i++) {
+    const imageCaption = `📎 #${fb.rowNumber} ảnh comment ${i + 1}/${commentImages.length}`;
+    try {
+      await sendTelegramPhoto(chatId, commentImages[i], imageCaption, sendOptions, null);
+    } catch (err) {
+      console.error('Send comment image error:', err.message);
+    }
   }
 }
 
