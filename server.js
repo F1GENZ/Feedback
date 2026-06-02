@@ -39,6 +39,8 @@ let r2UploadDisabledUntil = 0;
 let lastR2AuthWarningAt = 0;
 const R2_AUTH_BACKOFF_MS = 10 * 60 * 1000;
 let r2AuthDisabled = false;
+const telegramMediaGroups = new Map();
+const TELEGRAM_MEDIA_GROUP_DELAY_MS = 1200;
 // Helper: Format Vietnam timezone timestamp
 function formatVNTimestamp(format = 'full') {
   const now = new Date();
@@ -70,6 +72,12 @@ function extractCommentImageUrls(text) {
   if (!text) return [];
 
   const urls = [];
+  const telegramIdRegex = /\[TG_IMAGE\]\s*(\S+)/g;
+  let idMatch;
+  while ((idMatch = telegramIdRegex.exec(text)) !== null) {
+    urls.push(idMatch[1].trim());
+  }
+
   const markerRegex = /\[IMAGE\]\s*(https?:\/\/\S+)/g;
   let match;
   while ((match = markerRegex.exec(text)) !== null) {
@@ -93,6 +101,7 @@ function extractCommentImageUrls(text) {
 function stripCommentImageData(text) {
   if (!text) return '';
   return text
+    .replace(/\[TG_IMAGE\]\s*\S+/g, '')
     .replace(/\[IMAGE\]\s*https?:\/\/\S+/g, '')
     .replace(/https?:\/\/\S*(?:images\.f1genz\.dev|api\.telegram\.org\/file)\S*/g, '')
     .replace(/https?:\/\/\S+\.(?:png|jpe?g|gif|webp)(?:\?\S*)?/gi, '')
@@ -104,10 +113,15 @@ function getFeedbackCommentImages(feedback) {
   return comments.flatMap(comment => extractCommentImageUrls(comment.text || ''));
 }
 
-function formatTelegramImageComment(firstName, text, imageUrl) {
+function formatTelegramImageComment(firstName, text, imageUrl, fileId = '') {
   const prefix = `[Telegram] ${firstName}: ${text || ''}`.trim();
-  if (!imageUrl || imageUrl.startsWith('Error:')) return prefix;
-  return `${prefix}\n[IMAGE]${imageUrl}`;
+  const imageRef = formatTelegramImageReference(imageUrl, fileId);
+  return imageRef ? `${prefix}\n${imageRef}` : prefix;
+}
+
+function formatTelegramImageReference(imageUrl, fileId) {
+  if (imageUrl && !imageUrl.startsWith('Error:')) return `[IMAGE]${imageUrl}`;
+  return fileId ? `[TG_IMAGE]${fileId}` : '';
 }
 
 // Singleton S3 client (reused across all uploads)
@@ -414,14 +428,15 @@ function parseMessageContent(text, firstName) {
   return { shop, link, host, tags, note: content, message };
 }
 
-async function handleCreateFromTelegram(chatId, firstName, text, photoId, userId, chatType) {
+async function handleCreateFromTelegram(chatId, firstName, text, photoId, userId, chatType, extraPhotoIds = []) {
   try {
     const parsed = parseMessageContent(text || '', firstName);
     const ts = formatVNTimestamp();
     const deadline = hasUrgentTag({ tags: parsed.tags }) ? formatTodayDateInput() : '';
+    const feedbackId = Date.now().toString();
 
     const row = [
-      Date.now().toString(), deadline, parsed.host, parsed.shop, parsed.link,
+      feedbackId, deadline, parsed.host, parsed.shop, parsed.link,
       'Feedback', parsed.tags, '', '', parsed.note,
       ts, parsed.message, userId, photoId || '', ''
     ];
@@ -429,6 +444,20 @@ async function handleCreateFromTelegram(chatId, firstName, text, photoId, userId
     invalidateDataCache();
 
     const data = await getCachedData(true);
+    const createdRow = (data.rows || []).find(r => r.id === feedbackId);
+
+    if (createdRow && extraPhotoIds.length > 0) {
+      const imageLines = [];
+      for (let i = 0; i < extraPhotoIds.length; i++) {
+        const photoUrl = await uploadTelegramPhotoToR2(extraPhotoIds[i]);
+        const imageRef = formatTelegramImageReference(photoUrl, extraPhotoIds[i]);
+        if (imageRef) imageLines.push(imageRef);
+      }
+      if (imageLines.length > 0) {
+        await addCommentToFeedback(createdRow.rowNumber, `[Telegram] ${firstName}: ảnh bổ sung\n${imageLines.join('\n')}`);
+      }
+    }
+
     const feedbackCount = (data.rows || []).filter(r => r.host === parsed.host && r.stage === 'Feedback').length;
     await sendTelegramMessage(chatId, `✅ ${parsed.host} có ${feedbackCount} feedback`);
 
@@ -441,6 +470,95 @@ async function handleCreateFromTelegram(chatId, firstName, text, photoId, userId
     console.error('Create from Telegram error:', error);
     await sendTelegramMessage(chatId, `❌ Lỗi: ${error.message}`);
   }
+}
+
+function getTelegramMessageImageId(message) {
+  if (message.document && message.document.mime_type && message.document.mime_type.startsWith('image/')) {
+    return message.document.file_id;
+  }
+  if (message.photo && message.photo.length > 0) {
+    return message.photo[message.photo.length - 1].file_id;
+  }
+  return '';
+}
+
+function isTelegramCreateCommandText(text) {
+  return /^\/f(?:@\S+)?(?:\s|$)/.test(text || '');
+}
+
+function stripTelegramCreateCommand(text) {
+  return (text || '').replace(/^\/f(?:@\S+)?\s*/, '').trim();
+}
+
+function queueTelegramMediaGroup({ message, chatId, firstName, userId, chatType, text, photoId }) {
+  const key = `${chatId}:${message.media_group_id}`;
+  const originalText = message.reply_to_message?.text || message.reply_to_message?.caption || '';
+  const replyMatch = originalText.match(/#(\d+)/);
+  const existing = telegramMediaGroups.get(key) || {
+    chatId,
+    firstName,
+    userId,
+    chatType,
+    text: '',
+    photoIds: [],
+    replyRowNumber: replyMatch ? parseInt(replyMatch[1], 10) : null,
+    timer: null
+  };
+
+  if (text && !existing.text) existing.text = text;
+  if (photoId && !existing.photoIds.includes(photoId)) existing.photoIds.push(photoId);
+  if (!existing.replyRowNumber && replyMatch) existing.replyRowNumber = parseInt(replyMatch[1], 10);
+
+  clearTimeout(existing.timer);
+  existing.timer = setTimeout(() => {
+    processTelegramMediaGroup(key).catch(error => {
+      console.error('Telegram media group error:', error);
+      sendTelegramMessage(chatId, `❌ Lỗi album ảnh: ${error.message}`).catch(() => {});
+    });
+  }, TELEGRAM_MEDIA_GROUP_DELAY_MS);
+
+  telegramMediaGroups.set(key, existing);
+}
+
+async function buildTelegramAlbumComment(firstName, text, photoIds) {
+  const imageLines = [];
+  for (const photoId of photoIds) {
+    const photoUrl = await uploadTelegramPhotoToR2(photoId);
+    const imageRef = formatTelegramImageReference(photoUrl, photoId);
+    if (imageRef) imageLines.push(imageRef);
+  }
+
+  const prefix = `[Telegram] ${firstName}: ${text || 'ảnh'}`;
+  return imageLines.length > 0 ? `${prefix}\n${imageLines.join('\n')}` : prefix;
+}
+
+async function processTelegramMediaGroup(key) {
+  const group = telegramMediaGroups.get(key);
+  if (!group) return;
+  telegramMediaGroups.delete(key);
+
+  if (group.replyRowNumber) {
+    const commentText = await buildTelegramAlbumComment(group.firstName, group.text, group.photoIds);
+    await addCommentToFeedback(group.replyRowNumber, commentText);
+    await sendTelegramMessage(group.chatId, `✅ Đã thêm ${group.photoIds.length} ảnh vào #${group.replyRowNumber}`);
+    return;
+  }
+
+  const isCreateCommand = isTelegramCreateCommandText(group.text);
+  if (group.chatType !== 'private' && !isCreateCommand) return;
+
+  const createText = isCreateCommand
+    ? stripTelegramCreateCommand(group.text)
+    : group.text;
+  await handleCreateFromTelegram(
+    group.chatId,
+    group.firstName,
+    createText,
+    group.photoIds[0] || '',
+    group.userId,
+    group.chatType,
+    group.photoIds.slice(1)
+  );
 }
 
 // ==================== TELEGRAM BOT WEBHOOK ====================
@@ -461,10 +579,11 @@ app.post('/api/telegram-webhook', async (req, res) => {
     const firstName = message.from.first_name || 'User';
     const chatType = message.chat.type;
     
-    // Extract photo if present
-    let photoId = '';
-    if (message.photo && message.photo.length > 0) {
-      photoId = message.photo[message.photo.length - 1].file_id;
+    const photoId = getTelegramMessageImageId(message);
+
+    if (message.media_group_id && photoId) {
+      queueTelegramMediaGroup({ message, chatId, firstName, userId, chatType, text, photoId });
+      return res.json({ ok: true });
     }
     
     // Handle /myid command - show user's Telegram ID
@@ -599,12 +718,12 @@ app.post('/api/telegram-webhook', async (req, res) => {
             // Check for document (uncompressed image) first, then photo
             if (message.document && message.document.mime_type && message.document.mime_type.startsWith('image/')) {
               const photoUrl = await uploadTelegramPhotoToR2(message.document.file_id);
-              commentText = formatTelegramImageComment(firstName, extraText || 'Done', photoUrl);
+              commentText = formatTelegramImageComment(firstName, extraText || 'Done', photoUrl, message.document.file_id);
             } else if (message.photo && message.photo.length > 0) {
               // Get largest photo (compressed)
               const photo = message.photo[message.photo.length - 1];
               const photoUrl = await uploadTelegramPhotoToR2(photo.file_id);
-              commentText = formatTelegramImageComment(firstName, extraText || 'Done', photoUrl);
+              commentText = formatTelegramImageComment(firstName, extraText || 'Done', photoUrl, photo.file_id);
             } else if (extraText) {
               commentText = `[Telegram] ${firstName}: ${extraText}`;
             }
@@ -648,11 +767,11 @@ app.post('/api/telegram-webhook', async (req, res) => {
             // Check for document (uncompressed) first, then photo
             if (message.document && message.document.mime_type && message.document.mime_type.startsWith('image/')) {
               const photoUrl = await uploadTelegramPhotoToR2(message.document.file_id);
-              commentText = formatTelegramImageComment(firstName, replyText, photoUrl);
+              commentText = formatTelegramImageComment(firstName, replyText, photoUrl, message.document.file_id);
             } else if (message.photo && message.photo.length > 0) {
               const photo = message.photo[message.photo.length - 1];
               const photoUrl = await uploadTelegramPhotoToR2(photo.file_id);
-              commentText = formatTelegramImageComment(firstName, replyText, photoUrl);
+              commentText = formatTelegramImageComment(firstName, replyText, photoUrl, photo.file_id);
             }
             
             await addCommentToFeedback(rowNumber, commentText);
@@ -699,8 +818,8 @@ app.post('/api/telegram-webhook', async (req, res) => {
     }
     
     // Handle /f command - Create feedback (group + private)
-    if (text.startsWith('/f ') || text.startsWith('/f@')) {
-      const createText = text.replace(/^\/f(@\S+)?\s*/, '').trim();
+    if (isTelegramCreateCommandText(text)) {
+      const createText = stripTelegramCreateCommand(text);
       if (!createText && !photoId) {
         await sendTelegramMessage(chatId, '⚠️ Cần nội dung.\nVD: `/f neymarsport.com fix lỗi`', { parse_mode: 'Markdown' });
         return res.json({ ok: true });
