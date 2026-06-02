@@ -1293,10 +1293,15 @@ app.get('/api/exec', async (req, res) => {
   }
 });
 
-// Telegram Image Proxy Endpoint (uses old bot token for image access)
+function buildTelegramImageProxyUrl(fileId) {
+  return `/api/telegram-image?raw=1&fileId=${encodeURIComponent(fileId)}`;
+}
+
+// Telegram Image Proxy Endpoint
 app.get('/api/telegram-image', async (req, res) => {
   const fileId = req.query.fileId;
   const rowNumber = req.query.rowNumber; // Optional: to update Sheet
+  const raw = req.query.raw === '1';
   
   if (!fileId) {
     return res.json({ success: false, message: 'Missing fileId parameter' });
@@ -1304,11 +1309,13 @@ app.get('/api/telegram-image', async (req, res) => {
   
   // If already a URL, return it directly
   if (fileId.startsWith('http://') || fileId.startsWith('https://')) {
+    if (raw) return res.redirect(fileId);
     return res.json({ success: true, url: fileId });
   }
   
   // Check cache first
   if (imageUrlCache.has(fileId)) {
+    if (raw) return res.redirect(imageUrlCache.get(fileId));
     return res.json({ success: true, url: imageUrlCache.get(fileId) });
   }
   
@@ -1328,11 +1335,24 @@ app.get('/api/telegram-image', async (req, res) => {
     
     const filePath = data.result.file_path;
     const fileUrl = `https://api.telegram.org/file/bot${botToken}/${filePath}`;
+
+    if (raw) {
+      const imageResponse = await fetch(fileUrl);
+      if (!imageResponse.ok) {
+        return res.status(502).send('Could not download Telegram image');
+      }
+
+      const contentType = imageResponse.headers.get('content-type') || 'image/jpeg';
+      const buffer = Buffer.from(await imageResponse.arrayBuffer());
+      res.setHeader('Content-Type', contentType);
+      res.setHeader('Cache-Control', 'public, max-age=3600');
+      return res.send(buffer);
+    }
     
     // Download and upload to R2 for permanent URL
     try {
       if (shouldSkipR2Upload()) {
-        return res.json({ success: true, url: fileUrl, temporary: true });
+        return res.json({ success: true, url: buildTelegramImageProxyUrl(fileId), temporary: true });
       }
 
       const downloadResponse = await fetch(fileUrl);
@@ -1367,10 +1387,10 @@ app.get('/api/telegram-image', async (req, res) => {
       handleR2UploadError(uploadError, 'Failed to upload to R2');
     }
     
-    // Fallback to Telegram URL (temporary)
+    // Fallback to proxy URL (temporary, does not expose bot token)
     return res.json({ 
       success: true, 
-      url: fileUrl,
+      url: buildTelegramImageProxyUrl(fileId),
       temporary: true
     });
   } catch (error) {
