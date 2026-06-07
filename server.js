@@ -379,6 +379,20 @@ const HOST_ALIAS_MAP = {
   'tuan': 'Tuan', 'tuấn': 'Tuan'
 };
 
+function escapeRegExp(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function removeDuplicateFileLinkFromNote(note, fileLink) {
+  const link = (fileLink || '').trim();
+  if (!note || !link) return note || '';
+
+  return note
+    .replace(new RegExp(`(^|\\s)${escapeRegExp(link)}(?=\\s|$)`, 'g'), ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function parseMessageContent(text, firstName) {
   const message = text || '';
   const cleaned = message.replace(/[^\p{L}\p{N}\s]/gu, ' ').trim();
@@ -423,6 +437,7 @@ function parseMessageContent(text, firstName) {
   });
   hostMatch.forEach(h => { content = content.replace(new RegExp(`\\b${h}\\b`, 'gi'), '').trim(); });
   cleaned.split(/[\s,]+/).filter(w => TAGS_LIST.includes(normalizeTagToken(w))).forEach(t => { content = content.replace(new RegExp(`\\b${t}\\b`, 'gi'), '').trim(); });
+  content = removeDuplicateFileLinkFromNote(content, link);
   content = content.replace(/[.,;]{2,}/g, ' ').replace(/\s+/g, ' ').trim();
 
   return { shop, link, host, tags, note: content, message };
