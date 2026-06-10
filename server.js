@@ -808,12 +808,9 @@ app.post('/api/telegram-webhook', async (req, res) => {
               await sendTelegramMessage(chatId, `🎉 Không còn feedback nào!`);
             }
           } else if (lowerText === 'del' || lowerText.startsWith('del ')) {
-            // Delete feedback (set Stage = Deleted)
-            const delNow = new Date();
-            const delVn = new Date(delNow.toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' }));
-            const delTs = `${delVn.getHours().toString().padStart(2,'0')}:${delVn.getMinutes().toString().padStart(2,'0')}:${delVn.getSeconds().toString().padStart(2,'0')} ${delVn.getDate().toString().padStart(2,'0')}/${(delVn.getMonth()+1).toString().padStart(2,'0')}/${delVn.getFullYear()}`;
-            await sheetsClient.updateCell(rowNumber, 'F', 'Deleted');
-            await sheetsClient.updateCell(rowNumber, 'O', delTs);
+            // Permanently remove the feedback row from Google Sheets.
+            await sheetsClient.deleteRow(rowNumber);
+            invalidateDataCache();
             await sendTelegramMessage(chatId, `🗑️ Đã xóa ID #${rowNumber}`);
           } else {
             // Any other reply → add as comment
