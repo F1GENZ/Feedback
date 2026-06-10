@@ -519,7 +519,7 @@ async function handleCreateFromTelegram(chatId, firstName, text, photoId, userId
     }
 
     if (createdRow) {
-      await pushUrgentFeedbackToGroup(createdRow, 'mới');
+      await pushUrgentFeedbackToGroup(createdRow, 'mới', chatId);
     }
   } catch (error) {
     console.error('Create from Telegram error:', error);
@@ -1033,16 +1033,19 @@ async function sendFeedbackToTelegram(chatId, fb, options = {}) {
   }
 }
 
-async function pushUrgentFeedbackToGroup(feedback, reason = 'gấp') {
+async function pushUrgentFeedbackToGroup(feedback, reason = 'gấp', sourceChatId = '') {
   if (!shouldPushUrgentFeedback(feedback)) return;
 
   const groupChatId = process.env.TELEGRAM_GROUP_CHAT_ID;
-  if (!groupChatId) {
+  const targetChatIds = [...new Set([sourceChatId, groupChatId].filter(Boolean).map(String))];
+  if (targetChatIds.length === 0) {
     console.warn('[Urgent] TELEGRAM_GROUP_CHAT_ID not configured');
     return;
   }
 
-  await sendFeedbackToTelegram(groupChatId, feedback, { noteLimit: 800 });
+  for (const chatId of targetChatIds) {
+    await sendFeedbackToTelegram(chatId, feedback, { noteLimit: 800 });
+  }
 }
 
 // Background R2 upload (non-blocking)
