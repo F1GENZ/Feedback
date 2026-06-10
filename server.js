@@ -1039,11 +1039,6 @@ async function pushUrgentFeedbackToGroup(feedback, reason = 'gấp') {
     return;
   }
 
-  await sendTelegramMessage(
-    groupChatId,
-    `🔥 Feedback ${reason}: #${feedback.rowNumber} ${feedback.host || '-'} - ${feedback.shop || 'N/A'}`,
-    { disable_web_page_preview: true }
-  );
   await sendFeedbackToTelegram(groupChatId, feedback, { noteLimit: 800 });
 }
 
