@@ -851,6 +851,9 @@ app.post('/api/telegram-webhook', async (req, res) => {
     
     // Handle /help command
     if (text === '/help') {
+      const sheetUrl = process.env.SHEET_ID
+        ? `https://docs.google.com/spreadsheets/d/${process.env.SHEET_ID}/edit`
+        : '';
       await sendTelegramMessage(chatId,
         `📚 *Hướng dẫn sử dụng Bot*\n\n` +
         `*🆕 Tạo feedback:*\n` +
@@ -866,7 +869,8 @@ app.post('/api/telegram-webhook', async (req, res) => {
         `• \`done <ghi chú>\` - Done + note\n` +
         `• \`del\` - Xóa feedback\n` +
         `• text/ảnh khác - Thêm comment\n\n` +
-        `*🔧 Khác:* \`/myid\` \`/groupid\``,
+        `*🔧 Khác:* \`/myid\` \`/groupid\`\n\n` +
+        (sheetUrl ? `*🗃 Database:*\n${sheetUrl}` : `*🗃 Database:* Chưa cấu hình SHEET_ID`),
         { parse_mode: 'Markdown' }
       );
       return res.json({ ok: true });
