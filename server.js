@@ -1327,6 +1327,9 @@ app.post('/api/exec', async (req, res) => {
       case 'cleanupArchivedFeedbacks':
         result = await cleanupArchivedFeedbacks();
         break;
+      case 'repairFeedbackSheet':
+        result = await repairFeedbackSheet();
+        break;
       default:
         result = { success: false, message: 'Unknown action: ' + action };
     }
@@ -1552,6 +1555,53 @@ async function cleanupArchivedFeedbacks() {
     success: true,
     deleted,
     message: `Đã clear ${deleted} feedback khỏi Done/Đã báo khách`
+  };
+}
+
+function extractShiftedFeedbackRow(rawRow, existingIds) {
+  for (let index = 1; index < rawRow.length; index++) {
+    const id = String(rawRow[index] || '').trim();
+    if (!/^\d{12,16}$/.test(id) || existingIds.has(id)) continue;
+
+    const candidate = rawRow.slice(index, index + 16);
+    while (candidate.length < 16) candidate.push('');
+    if (!candidate[2] && !candidate[3]) continue;
+
+    return candidate;
+  }
+  return null;
+}
+
+async function repairFeedbackSheet() {
+  const data = await sheetsClient.getAllData();
+  const validRows = data.rows || [];
+  const lastValidRow = validRows.reduce((max, row) => Math.max(max, row.rowNumber), 2);
+  const existingIds = new Set(validRows.map(row => String(row.id || '').trim()).filter(Boolean));
+  const rawData = await sheetsClient.getRawFeedbackData();
+
+  if (rawData.lastUsedRow <= lastValidRow) {
+    return { success: true, rescued: 0, trimmed: 0, message: 'Sheet không có vùng dữ liệu lệch' };
+  }
+
+  const misplacedRows = rawData.values
+    .slice(lastValidRow)
+    .map(row => extractShiftedFeedbackRow(row, existingIds))
+    .filter(Boolean);
+
+  const firstTailRow = lastValidRow + 1;
+  const trimmed = rawData.lastUsedRow - lastValidRow;
+  await sheetsClient.deleteFeedbackRowRange(firstTailRow, rawData.lastUsedRow);
+
+  for (const row of misplacedRows) {
+    await sheetsClient.appendRow(row);
+  }
+
+  invalidateDataCache();
+  return {
+    success: true,
+    rescued: misplacedRows.length,
+    trimmed,
+    message: `Đã cứu ${misplacedRows.length} feedback và xóa ${trimmed} dòng lệch/rỗng`
   };
 }
 

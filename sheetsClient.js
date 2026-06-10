@@ -85,17 +85,67 @@ class SheetsClient {
   }
 
   async appendRow(rowArray) {
-    // rowArray should match the columns order A-N
+    // Keep appends anchored to the canonical feedback columns.
     try {
       await this.sheets.spreadsheets.values.append({
         spreadsheetId: SHEET_ID,
-        range: SHEET_NAME,
+        range: `${SHEET_NAME}!A:P`,
         valueInputOption: 'USER_ENTERED',
+        insertDataOption: 'INSERT_ROWS',
         resource: { values: [rowArray] },
       });
       return true;
     } catch (error) {
       console.error('SheetsClient: appendRow Error:', error);
+      throw error;
+    }
+  }
+
+  async getRawFeedbackData() {
+    try {
+      const response = await this.sheets.spreadsheets.values.get({
+        spreadsheetId: SHEET_ID,
+        range: `${SHEET_NAME}!A:Z`,
+      });
+      const values = response.data.values || [];
+      return {
+        values,
+        lastUsedRow: values.length
+      };
+    } catch (error) {
+      console.error('SheetsClient: getRawFeedbackData Error:', error);
+      throw error;
+    }
+  }
+
+  async deleteFeedbackRowRange(startRowNumber, endRowNumber) {
+    try {
+      if (!startRowNumber || !endRowNumber || endRowNumber < startRowNumber) return true;
+
+      const spreadsheet = await this.sheets.spreadsheets.get({
+        spreadsheetId: SHEET_ID,
+      });
+      const sheet = spreadsheet.data.sheets.find(s => s.properties.title === SHEET_NAME);
+      const sheetId = sheet.properties.sheetId;
+
+      await this.sheets.spreadsheets.batchUpdate({
+        spreadsheetId: SHEET_ID,
+        resource: {
+          requests: [{
+            deleteDimension: {
+              range: {
+                sheetId,
+                dimension: 'ROWS',
+                startIndex: startRowNumber - 1,
+                endIndex: endRowNumber
+              }
+            }
+          }]
+        }
+      });
+      return true;
+    } catch (error) {
+      console.error('SheetsClient: deleteFeedbackRowRange Error:', error);
       throw error;
     }
   }
