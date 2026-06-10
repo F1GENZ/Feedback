@@ -277,6 +277,32 @@ function addUrgentTag(tags) {
   return parts.join(', ');
 }
 
+function rowArrayToFeedback(rowNumber, row = []) {
+  return {
+    rowNumber,
+    id: row[0] || '',
+    deadline: row[1] || '',
+    host: row[2] || '',
+    shop: row[3] || '',
+    link: row[4] || '',
+    stage: row[5] || '',
+    tags: row[6] || '',
+    devNote: row[7] || '',
+    imageNote: row[8] || '',
+    note: row[9] || '',
+    time: row[10] || '',
+    message: row[11] || '',
+    messageId: row[12] || '',
+    imageId: row[13] || '',
+    updatedAt: row[14] || '',
+    priority: row[15] || ''
+  };
+}
+
+function shouldPushUrgentFeedback(feedback) {
+  return feedback && feedback.stage === 'Feedback' && hasUrgentTag(feedback);
+}
+
 function getAvailableHosts(rows = []) {
   const hosts = [...Object.values(TELEGRAM_ID_TO_HOST), ...rows.map(row => row.host).filter(Boolean)];
   return [...new Set(hosts)].filter(Boolean);
@@ -360,6 +386,17 @@ async function runOverdueFeedbackJob() {
         `🔥 ${overdueRows.length} feedback quá deadline đã gắn tag Gấp:\n${lines.join('\n')}${more}`,
         { disable_web_page_preview: true }
       );
+
+      for (const row of overdueRows) {
+        await pushUrgentFeedbackToGroup(
+          {
+            ...row,
+            tags: addUrgentTag(row.tags),
+            updatedAt: timestamp
+          },
+          'quá deadline'
+        );
+      }
     }
   } catch (error) {
     console.error('[Deadline] Overdue feedback job failed:', error);
@@ -480,6 +517,10 @@ async function handleCreateFromTelegram(chatId, firstName, text, photoId, userId
     const groupChatId = process.env.TELEGRAM_GROUP_CHAT_ID;
     if (groupChatId) {
       await sendTelegramMessage(groupChatId, `📬 ${parsed.host} có ${feedbackCount} feedback`);
+    }
+
+    if (createdRow) {
+      await pushUrgentFeedbackToGroup(createdRow, 'mới');
     }
   } catch (error) {
     console.error('Create from Telegram error:', error);
@@ -989,6 +1030,23 @@ async function sendFeedbackToTelegram(chatId, fb, options = {}) {
   }
 }
 
+async function pushUrgentFeedbackToGroup(feedback, reason = 'gấp') {
+  if (!shouldPushUrgentFeedback(feedback)) return;
+
+  const groupChatId = process.env.TELEGRAM_GROUP_CHAT_ID;
+  if (!groupChatId) {
+    console.warn('[Urgent] TELEGRAM_GROUP_CHAT_ID not configured');
+    return;
+  }
+
+  await sendTelegramMessage(
+    groupChatId,
+    `🔥 Feedback ${reason}: #${feedback.rowNumber} ${feedback.host || '-'} - ${feedback.shop || 'N/A'}`,
+    { disable_web_page_preview: true }
+  );
+  await sendFeedbackToTelegram(groupChatId, feedback, { noteLimit: 800 });
+}
+
 // Background R2 upload (non-blocking)
 async function uploadToR2InBackground(botToken, fileId, rowNumber) {
   if (shouldSkipR2Upload()) return;
@@ -1488,11 +1546,12 @@ async function createFeedback(feedback) {
   const timestamp = formatVNTimestamp();
   const tags = normalizeTags(feedback.tags || '');
   const deadline = hasUrgentTag({ tags }) ? formatTodayDateInput() : (feedback.deadline || '');
+  const feedbackId = Date.now().toString();
   
   // Prepare row data (Columns A-O)
   // A: ID, B: Deadline, C: Host, D: Shop, E: Link, F: Stage, G: Tags, H: Dev_note, I: Image_note, J: Note, K: Time, L: Message, M: MessageID, N: ImageID, O: UpdatedAt
   const row = [
-    Date.now().toString(),          // ID (timestamp)
+    feedbackId,                     // ID (timestamp)
     deadline,                       // Deadline
     feedback.host || '',            // Host
     feedback.shop || '',            // Shop
@@ -1513,9 +1572,15 @@ async function createFeedback(feedback) {
   const success = await sheetsClient.appendRow(row);
   invalidateDataCache();
   if (success) {
+    const data = await getCachedData(true);
+    const createdRow = (data.rows || []).find(r => r.id === feedbackId);
+
     // Notify host if stage is Feedback
     if ((feedback.stage || 'Feedback') === 'Feedback' && feedback.host) {
       await notifyHostFeedbackCount(feedback.host);
+    }
+    if (createdRow) {
+      await pushUrgentFeedbackToGroup(createdRow, 'mới');
     }
     // await sheetsClient.logHistory('CREATE', `Tạo feedback: ${feedback.shop || 'N/A'}`); // DISABLED
     return { success: true, message: 'Đã tạo feedback thành công!' };
@@ -1531,6 +1596,7 @@ async function updateFeedback(rowNumber, updates) {
   // Expecting array of values A-N
   
   if (!currentRowRaw) throw new Error('Row not found');
+  const wasUrgent = shouldPushUrgentFeedback(rowArrayToFeedback(rowNumber, currentRowRaw));
   
   // Merge logic
   // Columns: A-P (0-15)
@@ -1558,10 +1624,14 @@ async function updateFeedback(rowNumber, updates) {
   
   await sheetsClient.updateRow(rowNumber, newRow);
   invalidateDataCache();
+  const updatedFeedback = rowArrayToFeedback(rowNumber, newRow);
   
   // Notify host if stage changed to Feedback
   if (updates.stage === 'Feedback' && newRow[2]) {
     await notifyHostFeedbackCount(newRow[2]);
+  }
+  if (!wasUrgent && shouldPushUrgentFeedback(updatedFeedback)) {
+    await pushUrgentFeedbackToGroup(updatedFeedback, 'vừa được đánh dấu gấp');
   }
   
   return { success: true, message: 'Cập nhật thành công!' };
@@ -1571,12 +1641,18 @@ async function updateStage(rowNumber, newStage) {
   // Get current row to check host
   const currentRow = await sheetsClient.getRow(rowNumber);
   const host = currentRow[2]; // Column C = Host
+  const wasUrgent = shouldPushUrgentFeedback(rowArrayToFeedback(rowNumber, currentRow));
   
   const timestamp = formatVNTimestamp();
   
   await sheetsClient.updateCell(rowNumber, 'F', newStage);
   await sheetsClient.updateCell(rowNumber, 'O', timestamp);
   invalidateDataCache();
+  const updatedRow = [...currentRow];
+  while(updatedRow.length < 16) updatedRow.push('');
+  updatedRow[5] = newStage;
+  updatedRow[14] = timestamp;
+  const updatedFeedback = rowArrayToFeedback(rowNumber, updatedRow);
   
   // Notify host if stage changed to Feedback
   if (newStage === 'Feedback' && host) {
@@ -1586,6 +1662,9 @@ async function updateStage(rowNumber, newStage) {
     } catch (notifyError) {
       console.error('[Notification] Error calling notifyHostFeedbackCount:', notifyError);
     }
+  }
+  if (!wasUrgent && shouldPushUrgentFeedback(updatedFeedback)) {
+    await pushUrgentFeedbackToGroup(updatedFeedback, 'vừa quay lại Feedback');
   }
   
   // await sheetsClient.logHistory('UPDATE_STAGE', `Row ${rowNumber} -> ${newStage}`); // DISABLED
@@ -1610,10 +1689,27 @@ async function bulkUpdateStage(rowNumbers, newStage) {
   if (!newStage) throw new Error('Missing newStage');
 
   const timestamp = formatVNTimestamp();
+  const urgentFeedbacksToPush = [];
 
   for (const rowNumber of rowNumbers) {
+    const currentRow = await sheetsClient.getRow(rowNumber);
+    const wasUrgent = shouldPushUrgentFeedback(rowArrayToFeedback(rowNumber, currentRow));
     await sheetsClient.updateCell(rowNumber, 'F', newStage);
     await sheetsClient.updateCell(rowNumber, 'O', timestamp);
+
+    const updatedRow = [...currentRow];
+    while(updatedRow.length < 16) updatedRow.push('');
+    updatedRow[5] = newStage;
+    updatedRow[14] = timestamp;
+    const updatedFeedback = rowArrayToFeedback(rowNumber, updatedRow);
+    if (!wasUrgent && shouldPushUrgentFeedback(updatedFeedback)) {
+      urgentFeedbacksToPush.push(updatedFeedback);
+    }
+  }
+  invalidateDataCache();
+
+  for (const feedback of urgentFeedbacksToPush) {
+    await pushUrgentFeedbackToGroup(feedback, 'vừa quay lại Feedback');
   }
 
   return { success: true, message: `Đã cập nhật ${rowNumbers.length} mục thành "${newStage}"` };
