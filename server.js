@@ -334,9 +334,7 @@ async function cleanupOldDoneFeedbacks(rows, force = false) {
     .map(row => row.rowNumber)
     .sort((a, b) => b - a);
 
-  for (const rowNumber of rowsToDelete) {
-    await sheetsClient.deleteRow(rowNumber);
-  }
+  await sheetsClient.deleteRows(rowsToDelete);
 
   if (rowsToDelete.length > 0) {
     invalidateDataCache();
@@ -1733,12 +1731,7 @@ async function bulkDelete(rowNumbers) {
     throw new Error('Missing or invalid rowNumbers');
   }
 
-  // Sort descending to delete from bottom up (prevents row shifting issues)
-  const sorted = [...rowNumbers].sort((a, b) => b - a);
-  
-  for (const rowNumber of sorted) {
-    await sheetsClient.deleteRow(rowNumber);
-  }
+  await sheetsClient.deleteRows(rowNumbers);
 
   return { success: true, message: `Đã xóa ${rowNumbers.length} mục` };
 }

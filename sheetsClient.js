@@ -185,6 +185,42 @@ class SheetsClient {
     }
   }
 
+  async deleteRows(rowNumbers) {
+    try {
+      if (!rowNumbers || !Array.isArray(rowNumbers) || rowNumbers.length === 0) return true;
+
+      const normalized = [...new Set(rowNumbers.map(n => parseInt(n, 10)).filter(Number.isInteger))]
+        .sort((a, b) => b - a);
+      if (normalized.length === 0) return true;
+
+      const spreadsheet = await this.sheets.spreadsheets.get({
+        spreadsheetId: SHEET_ID,
+      });
+      const sheet = spreadsheet.data.sheets.find(s => s.properties.title === SHEET_NAME);
+      const sheetId = sheet.properties.sheetId;
+
+      await this.sheets.spreadsheets.batchUpdate({
+        spreadsheetId: SHEET_ID,
+        resource: {
+          requests: normalized.map(rowNumber => ({
+            deleteDimension: {
+              range: {
+                sheetId: sheetId,
+                dimension: 'ROWS',
+                startIndex: rowNumber - 1,
+                endIndex: rowNumber
+              }
+            }
+          }))
+        }
+      });
+      return true;
+    } catch (error) {
+      console.error('SheetsClient: deleteRows Error:', error);
+      throw error;
+    }
+  }
+
   async getGuidesData() {
     try {
       const response = await this.sheets.spreadsheets.values.get({
