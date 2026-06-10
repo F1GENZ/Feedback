@@ -170,6 +170,7 @@ let _dataCache = null;
 let _dataCacheTime = 0;
 const DATA_CACHE_TTL = 10000; // 10 seconds
 const DONE_AUTO_DELETE_AFTER_DAYS = 30;
+const AUTO_DELETE_STAGES = new Set(['done', 'da bao khach']);
 let _lastDoneCleanupTime = 0;
 const DONE_CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 const OVERDUE_CHECK_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
@@ -325,7 +326,7 @@ async function cleanupOldDoneFeedbacks(rows, force = false) {
 
   const cutoff = now - DONE_AUTO_DELETE_AFTER_DAYS * 24 * 60 * 60 * 1000;
   const rowsToDelete = rows
-    .filter(row => row.stage === 'Done')
+    .filter(row => AUTO_DELETE_STAGES.has(normalizeText(row.stage)))
     .filter(row => {
       const doneTime = parseVNTimestamp(row.updatedAt || row.time);
       return doneTime > 0 && doneTime < cutoff;
@@ -339,7 +340,7 @@ async function cleanupOldDoneFeedbacks(rows, force = false) {
 
   if (rowsToDelete.length > 0) {
     invalidateDataCache();
-    console.log(`[Cleanup] Deleted ${rowsToDelete.length} Done feedback older than ${DONE_AUTO_DELETE_AFTER_DAYS} days`);
+    console.log(`[Cleanup] Deleted ${rowsToDelete.length} feedback from Done/Đã báo khách older than ${DONE_AUTO_DELETE_AFTER_DAYS} days`);
   }
 
   return rowsToDelete.length;
@@ -1321,6 +1322,9 @@ app.post('/api/exec', async (req, res) => {
       case 'deleteFeedbackImage':
         result = await deleteFeedbackImage(req.body.rowNumber);
         break;
+      case 'cleanupArchivedFeedbacks':
+        result = await cleanupArchivedFeedbacks();
+        break;
       default:
         result = { success: false, message: 'Unknown action: ' + action };
     }
@@ -1350,6 +1354,9 @@ app.get('/api/exec', async (req, res) => {
         break;
       case 'getHistory':
         result = await getHistory();
+        break;
+      case 'cleanupArchivedFeedbacks':
+        result = await cleanupArchivedFeedbacks();
         break;
       default:
         result = { success: false, message: 'Unknown action or use POST: ' + action };
@@ -1532,6 +1539,17 @@ async function getHistory() {
   return {
     success: true,
     history: data.rows || []
+  };
+}
+
+async function cleanupArchivedFeedbacks() {
+  const data = await sheetsClient.getAllData();
+  const deleted = await cleanupOldDoneFeedbacks(data.rows || [], true);
+  invalidateDataCache();
+  return {
+    success: true,
+    deleted,
+    message: `Đã clear ${deleted} feedback khỏi Done/Đã báo khách`
   };
 }
 
