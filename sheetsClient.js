@@ -85,20 +85,51 @@ class SheetsClient {
   }
 
   async appendRow(rowArray) {
-    // Keep appends anchored to the canonical feedback columns.
     try {
-      await this.sheets.spreadsheets.values.append({
+      const rowNumber = await this.getNextFeedbackRowNumber();
+      const normalizedRow = (Array.isArray(rowArray) ? [...rowArray] : []).slice(0, 16);
+      while (normalizedRow.length < 16) normalizedRow.push('');
+
+      await this.sheets.spreadsheets.values.update({
         spreadsheetId: SHEET_ID,
-        range: `${SHEET_NAME}!A:P`,
+        range: `${SHEET_NAME}!A${rowNumber}:P${rowNumber}`,
         valueInputOption: 'USER_ENTERED',
-        insertDataOption: 'INSERT_ROWS',
-        resource: { values: [rowArray] },
+        resource: { values: [normalizedRow] },
       });
       return true;
     } catch (error) {
       console.error('SheetsClient: appendRow Error:', error);
       throw error;
     }
+  }
+
+  isCanonicalFeedbackRow(row) {
+    if (!row || row.length === 0) return false;
+
+    const id = String(row[0] || '').trim();
+    const host = String(row[2] || '').trim();
+    const shop = String(row[3] || '').trim();
+    const stage = String(row[5] || '').trim();
+
+    return /^\d{12,16}$/.test(id) || Boolean(host || shop || stage);
+  }
+
+  async getNextFeedbackRowNumber() {
+    const response = await this.sheets.spreadsheets.values.get({
+      spreadsheetId: SHEET_ID,
+      range: `${SHEET_NAME}!A:P`,
+    });
+    const values = response.data.values || [];
+    let lastCanonicalRow = 2; // Row 1-2 are headers/legacy header area.
+
+    for (let index = values.length - 1; index >= 2; index--) {
+      if (this.isCanonicalFeedbackRow(values[index])) {
+        lastCanonicalRow = index + 1;
+        break;
+      }
+    }
+
+    return lastCanonicalRow + 1;
   }
 
   async getRawFeedbackData() {
