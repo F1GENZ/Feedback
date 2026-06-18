@@ -221,6 +221,36 @@ function getTodayStartTime() {
   return parseDeadlineDate(formatTodayDateInput());
 }
 
+function formatDeadlineForTelegram(value) {
+  if (!value) return '';
+  const raw = String(value).trim();
+  const time = parseDeadlineDate(raw);
+
+  if (time > 0) {
+    const date = new Date(time);
+    const dd = String(date.getDate()).padStart(2, '0');
+    const mm = String(date.getMonth() + 1).padStart(2, '0');
+    const yyyy = date.getFullYear();
+    return `${dd}/${mm}/${yyyy}`;
+  }
+
+  return raw;
+}
+
+function getDeadlineTelegramLine(fb) {
+  const deadline = formatDeadlineForTelegram(fb.deadline);
+  if (!deadline) return '';
+
+  const deadlineTime = parseDeadlineDate(fb.deadline);
+  if (deadlineTime > 0) {
+    const todayStart = getTodayStartTime();
+    if (deadlineTime < todayStart) return `⛔⛔ QUÁ DEADLINE: ${deadline} ⛔⛔`;
+    if (deadlineTime === todayStart) return `🚨🚨 DEADLINE HÔM NAY: ${deadline} 🚨🚨`;
+  }
+
+  return `⏰⏰ DEADLINE: ${deadline} ⏰⏰`;
+}
+
 function getPriorityValue(row) {
   const priority = parseInt(row.priority, 10);
   return Number.isNaN(priority) ? 999999 : priority;
@@ -378,7 +408,10 @@ async function runOverdueFeedbackJob() {
 
     const groupChatId = process.env.TELEGRAM_GROUP_CHAT_ID;
     if (groupChatId) {
-      const lines = overdueRows.slice(0, 10).map(row => `#${row.rowNumber} ${row.host || '-'} - ${row.shop || 'N/A'}`);
+      const lines = overdueRows.slice(0, 10).map(row => {
+        const deadline = formatDeadlineForTelegram(row.deadline);
+        return `#${row.rowNumber} ${row.host || '-'} - ${row.shop || 'N/A'}${deadline ? ` | DEADLINE: ${deadline}` : ''}`;
+      });
       const more = overdueRows.length > 10 ? `\n...và ${overdueRows.length - 10} feedback khác` : '';
       await sendTelegramMessage(
         groupChatId,
@@ -995,6 +1028,8 @@ function buildFeedbackCaption(fb, noteLimit = 500) {
   if (note.length > noteLimit) note = note.substring(0, noteLimit) + '...';
 
   let caption = hasHotTag(fb) ? `🔥🔥🔥 HOT 🔥🔥🔥\n` : '';
+  const deadlineLine = getDeadlineTelegramLine(fb);
+  if (deadlineLine) caption += `${deadlineLine}\n`;
   caption += `• ID: #${fb.rowNumber}\n`;
   caption += `• Shop: ${shop}\n`;
   caption += `• File: ${fb.link || 'KHÔNG có file'}`;
