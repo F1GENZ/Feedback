@@ -574,6 +574,14 @@ function isTelegramCreateCommandText(text) {
   return /^\/f(?:@\S+)?(?:\s|$)/.test(text || '');
 }
 
+function isTelegramCommandText(text, command) {
+  return new RegExp(`^/${command}(?:@\\S+)?(?:\\s|$)`).test(text || '');
+}
+
+function isTelegramSlashCommandText(text) {
+  return /^\/[A-Za-z0-9_]+(?:@\S+)?(?:\s|$)/.test(text || '');
+}
+
 function stripTelegramCreateCommand(text) {
   return (text || '').replace(/^\/f(?:@\S+)?\s*/, '').trim();
 }
@@ -675,7 +683,7 @@ app.post('/api/telegram-webhook', async (req, res) => {
     }
     
     // Handle /myid command - show user's Telegram ID
-    if (text === '/myid') {
+    if (isTelegramCommandText(text, 'myid')) {
       await sendTelegramMessage(chatId, 
         `🆔 *Thông tin của bạn:*\n\n` +
         `• User ID: \`${userId}\`\n` +
@@ -687,7 +695,7 @@ app.post('/api/telegram-webhook', async (req, res) => {
     }
     
     // Handle /groupid command - show group chat ID
-    if (text === '/groupid') {
+    if (isTelegramCommandText(text, 'groupid')) {
       const chatTitle = message.chat.title || 'N/A';
       
       await sendTelegramMessage(chatId, 
@@ -869,7 +877,7 @@ app.post('/api/telegram-webhook', async (req, res) => {
     }
     
     // Handle /start command
-    if (text === '/start') {
+    if (isTelegramCommandText(text, 'start')) {
       await sendTelegramMessage(chatId, 
         `👋 Xin chào ${firstName}!\n\n` +
         `🔹 /f <nội dung> - Tạo feedback\n` +
@@ -880,7 +888,7 @@ app.post('/api/telegram-webhook', async (req, res) => {
     }
     
     // Handle /help command
-    if (text === '/help') {
+    if (isTelegramCommandText(text, 'help')) {
       const sheetUrl = process.env.SHEET_ID
         ? `https://docs.google.com/spreadsheets/d/${process.env.SHEET_ID}/edit`
         : '';
@@ -914,6 +922,11 @@ app.post('/api/telegram-webhook', async (req, res) => {
         return res.json({ ok: true });
       }
       await handleCreateFromTelegram(chatId, firstName, createText, photoId, userId, chatType);
+      return res.json({ ok: true });
+    }
+
+    if (isTelegramSlashCommandText(text)) {
+      await sendTelegramMessage(chatId, '⚠️ Lệnh không hỗ trợ. Dùng /help để xem hướng dẫn.');
       return res.json({ ok: true });
     }
     
